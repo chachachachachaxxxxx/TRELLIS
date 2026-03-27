@@ -125,6 +125,11 @@ class TrellisTextTo3DPipeline(Pipeline):
         flow_model = self.models['sparse_structure_flow_model']
         reso = flow_model.resolution
         noise = torch.randn(num_samples, flow_model.in_channels, reso, reso, reso).to(self.device)
+# {
+#     ...模型自带的 sparse sampler 默认参数...,
+#     "steps": 你这次传的 steps,
+#     "cfg_strength": 你这次传的 cfg_strength,
+# }
         sampler_params = {**self.sparse_structure_sampler_params, **sampler_params}
         z_s = self.sparse_structure_sampler.sample(
             flow_model,

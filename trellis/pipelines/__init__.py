@@ -1,6 +1,23 @@
 from . import samplers
-from .trellis_image_to_3d import TrellisImageTo3DPipeline
-from .trellis_text_to_3d import TrellisTextTo3DPipeline
+
+__all__ = [
+    "samplers",
+    "TrellisImageTo3DPipeline",
+    "TrellisTextTo3DPipeline",
+    "from_pretrained",
+]
+
+
+def __getattr__(name: str):
+    if name == "TrellisImageTo3DPipeline":
+        from .trellis_image_to_3d import TrellisImageTo3DPipeline
+
+        return TrellisImageTo3DPipeline
+    if name == "TrellisTextTo3DPipeline":
+        from .trellis_text_to_3d import TrellisTextTo3DPipeline
+
+        return TrellisTextTo3DPipeline
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def from_pretrained(path: str):
@@ -22,4 +39,17 @@ def from_pretrained(path: str):
 
     with open(config_file, 'r') as f:
         config = json.load(f)
-    return globals()[config['name']].from_pretrained(path)
+
+    name = config["name"]
+    if name == "TrellisImageTo3DPipeline":
+        from .trellis_image_to_3d import TrellisImageTo3DPipeline
+
+        pipeline_cls = TrellisImageTo3DPipeline
+    elif name == "TrellisTextTo3DPipeline":
+        from .trellis_text_to_3d import TrellisTextTo3DPipeline
+
+        pipeline_cls = TrellisTextTo3DPipeline
+    else:
+        raise ValueError(f"Unknown pipeline class: {name}")
+
+    return pipeline_cls.from_pretrained(path)
