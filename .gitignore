@@ -398,3 +398,5 @@ FodyWeavers.xsd
 *.sln.iml
 
 output
+downloads
+outputs

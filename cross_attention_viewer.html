@@ -1,0 +1,868 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TRELLIS Cross-Attention Viewer</title>
+  <style>
+    :root {
+      --bg: #f5f7f8;
+      --panel: #ffffff;
+      --panel-soft: #eef3f5;
+      --line: #d7e0e4;
+      --ink: #1f2a33;
+      --muted: #5f6d76;
+      --accent: #0d7a72;
+      --accent-strong: #0a5e58;
+      --warn: #a4492b;
+      --shadow: 0 14px 34px rgba(20, 38, 48, 0.08);
+      --radius: 18px;
+      --radius-sm: 12px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      margin: 0;
+      min-height: 100%;
+      background: linear-gradient(180deg, #f8fafb 0%, #f2f5f6 100%);
+      color: var(--ink);
+      font-family: "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    }
+
+    body {
+      padding: 24px 16px 48px;
+    }
+
+    .page {
+      width: min(1280px, 100%);
+      margin: 0 auto;
+    }
+
+    .hero,
+    .toolbar,
+    .section,
+    .stage-panel,
+    .focus-card,
+    .raw-item {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+
+    .hero {
+      padding: 28px;
+      display: grid;
+      grid-template-columns: minmax(0, 1.5fr) minmax(280px, 0.9fr);
+      gap: 20px;
+      align-items: start;
+    }
+
+    .eyebrow {
+      margin: 0 0 10px;
+      font-size: 12px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--accent);
+      font-weight: 700;
+    }
+
+    .hero h1 {
+      margin: 0 0 12px;
+      font-size: clamp(28px, 4vw, 44px);
+      line-height: 1.02;
+    }
+
+    .hero p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.7;
+      font-size: 15px;
+    }
+
+    .hero-note {
+      padding: 18px;
+      border-radius: var(--radius-sm);
+      background: var(--panel-soft);
+      border: 1px solid var(--line);
+    }
+
+    .hero-note strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 14px;
+    }
+
+    .toolbar,
+    .section {
+      margin-top: 18px;
+      padding: 20px;
+    }
+
+    .toolbar {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(260px, 1fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .toolbar-label,
+    .section-label,
+    .card-label {
+      margin: 0 0 10px;
+      font-size: 12px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    button,
+    .chip-link {
+      appearance: none;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      border-radius: 999px;
+      padding: 10px 14px;
+      font: inherit;
+      cursor: pointer;
+      transition: all 180ms ease;
+      text-decoration: none;
+    }
+
+    button:hover,
+    .chip-link:hover {
+      border-color: #b8c8cf;
+      transform: translateY(-1px);
+    }
+
+    button.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+
+    .status {
+      min-height: 44px;
+      padding: 12px 14px;
+      border-radius: var(--radius-sm);
+      background: var(--panel-soft);
+      border: 1px solid var(--line);
+      color: var(--muted);
+      line-height: 1.6;
+      word-break: break-word;
+    }
+
+    .status.error {
+      color: var(--warn);
+      border-color: rgba(164, 73, 43, 0.22);
+      background: rgba(164, 73, 43, 0.06);
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    .summary-grid,
+    .stage-overview,
+    .focus-grid,
+    .raw-grid {
+      display: grid;
+      gap: 18px;
+    }
+
+    .summary-grid {
+      grid-template-columns: minmax(0, 1.3fr) minmax(320px, 1fr);
+    }
+
+    .panel {
+      padding: 18px;
+      border-radius: var(--radius-sm);
+      background: var(--panel-soft);
+      border: 1px solid var(--line);
+    }
+
+    .prompt {
+      padding: 16px;
+      border-radius: var(--radius-sm);
+      background: #fff;
+      border: 1px solid var(--line);
+      font-size: 17px;
+      line-height: 1.7;
+    }
+
+    .token-cloud {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .token {
+      padding: 7px 11px;
+      border-radius: 999px;
+      background: rgba(13, 122, 114, 0.08);
+      border: 1px solid rgba(13, 122, 114, 0.12);
+      color: var(--accent-strong);
+      font-size: 13px;
+    }
+
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .metric {
+      padding: 14px;
+      border-radius: var(--radius-sm);
+      background: #fff;
+      border: 1px solid var(--line);
+    }
+
+    .metric-name {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .metric-value {
+      display: block;
+      font-size: 18px;
+      font-weight: 700;
+      word-break: break-word;
+    }
+
+    .section-head {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+
+    .section-head h2,
+    .stage-title {
+      margin: 0;
+      font-size: clamp(22px, 3vw, 32px);
+      letter-spacing: -0.02em;
+    }
+
+    .stage-panel {
+      padding: 20px;
+    }
+
+    .badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .badge {
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: var(--panel-soft);
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .stage-overview {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      margin-top: 20px;
+    }
+
+    .image-card {
+      padding: 16px;
+      border-radius: var(--radius-sm);
+      background: var(--panel-soft);
+      border: 1px solid var(--line);
+    }
+
+    .image-card img,
+    .focus-card img {
+      width: 100%;
+      display: block;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: #fff;
+    }
+
+    .focus-grid,
+    .raw-grid {
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      margin-top: 18px;
+    }
+
+    .focus-card,
+    .raw-item {
+      padding: 18px;
+    }
+
+    .focus-card h3 {
+      margin: 0 0 8px;
+      font-size: 22px;
+    }
+
+    .focus-card .token-pill {
+      display: inline-flex;
+      margin-bottom: 12px;
+      padding: 7px 11px;
+      border-radius: 999px;
+      background: rgba(13, 122, 114, 0.08);
+      border: 1px solid rgba(13, 122, 114, 0.12);
+      color: var(--accent-strong);
+      font-size: 13px;
+    }
+
+    .image-stack {
+      display: grid;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .top-list {
+      display: grid;
+      gap: 12px;
+    }
+
+    .top-item {
+      padding: 14px;
+      border-radius: 14px;
+      background: var(--panel-soft);
+      border: 1px solid var(--line);
+    }
+
+    .top-item strong,
+    .raw-item strong {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 15px;
+    }
+
+    .top-item span,
+    .raw-item span {
+      color: var(--muted);
+      line-height: 1.6;
+      font-size: 14px;
+    }
+
+    .link-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .raw-code {
+      display: block;
+      margin-top: 8px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: var(--panel-soft);
+      border: 1px solid var(--line);
+      color: var(--accent-strong);
+      font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+      font-size: 12px;
+      word-break: break-all;
+    }
+
+    .empty {
+      padding: 18px;
+      border-radius: var(--radius-sm);
+      background: var(--panel-soft);
+      border: 1px dashed #c8d4d9;
+      color: var(--muted);
+      text-align: center;
+      line-height: 1.6;
+    }
+
+    @media (max-width: 960px) {
+      .hero,
+      .toolbar,
+      .summary-grid,
+      .stage-overview {
+        grid-template-columns: 1fr;
+      }
+
+      .section-head {
+        display: block;
+      }
+
+      .section-head h2 {
+        margin-bottom: 12px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="hero">
+      <div>
+        <p class="eyebrow">TRELLIS</p>
+        <h1>Cross-Attention Viewer</h1>
+        <p>
+          这个版本不再让浏览器去“选本地目录”。页面会直接读取仓库里配置好的
+          `cross_attention_trace` 结果目录，只要页面和 `output/` 在同一个站点下，就能直接浏览。
+        </p>
+      </div>
+      <div class="hero-note">
+        <strong>使用说明</strong>
+        <p>
+          默认读取页面里配置好的 trace case。若想临时指定别的目录，可在 URL 后面加
+          `?trace=output/xxx/cross_attention_trace`，也可以再加 `&label=xxx` 自定义显示名称。
+        </p>
+      </div>
+    </section>
+
+    <section class="toolbar">
+      <div>
+        <p class="toolbar-label">Trace Cases</p>
+        <div id="case-nav" class="chip-row"></div>
+      </div>
+      <div>
+        <p class="toolbar-label">Status</p>
+        <div id="status" class="status">正在初始化…</div>
+      </div>
+    </section>
+
+    <section id="summary-section" class="section hidden">
+      <div class="summary-grid">
+        <div class="panel">
+          <p class="section-label">Prompt</p>
+          <div id="prompt" class="prompt"></div>
+          <div id="token-cloud" class="token-cloud"></div>
+        </div>
+        <div class="panel">
+          <p class="section-label">Overview</p>
+          <div id="overview" class="metric-grid"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="stage-section" class="section hidden">
+      <div class="section-head">
+        <h2>Stages</h2>
+        <div id="stage-nav" class="chip-row"></div>
+      </div>
+      <div id="stage-root"></div>
+    </section>
+  </main>
+
+  <script>
+    const TRACE_CASES = [
+      {
+        id: "strawberry_trace",
+        label: "strawberry_trace",
+        path: "output/strawberry_trace/cross_attention_trace",
+      },
+    ];
+
+    const state = {
+      cases: [],
+      activeCase: null,
+      activeStage: null,
+      manifest: null,
+      promptTokens: null,
+      stageSummaries: new Map(),
+    };
+
+    const caseNavEl = document.getElementById("case-nav");
+    const statusEl = document.getElementById("status");
+    const summarySectionEl = document.getElementById("summary-section");
+    const stageSectionEl = document.getElementById("stage-section");
+    const promptEl = document.getElementById("prompt");
+    const tokenCloudEl = document.getElementById("token-cloud");
+    const overviewEl = document.getElementById("overview");
+    const stageNavEl = document.getElementById("stage-nav");
+    const stageRootEl = document.getElementById("stage-root");
+
+    init();
+
+    async function init() {
+      state.cases = getConfiguredCases();
+      renderCaseNav();
+
+      if (!state.cases.length) {
+        setStatus("没有配置可用的 trace 目录。", true);
+        return;
+      }
+
+      if (location.protocol === "file:") {
+        setStatus("请用 HTTP 服务打开这个页面，直接用 file:// 无法稳定读取相对 JSON 文件。", true);
+        return;
+      }
+
+      await loadCase(state.cases[0].id);
+    }
+
+    function getConfiguredCases() {
+      const params = new URLSearchParams(location.search);
+      const tracePath = normalizeBasePath(params.get("trace") || "");
+      const traceLabel = params.get("label") || "";
+
+      if (tracePath) {
+        return [{
+          id: "custom_trace",
+          label: traceLabel || guessCaseLabel(tracePath),
+          path: tracePath,
+        }];
+      }
+
+      return TRACE_CASES
+        .map((item, index) => ({
+          id: item.id || `trace_${index}`,
+          label: item.label || guessCaseLabel(item.path),
+          path: normalizeBasePath(item.path),
+        }))
+        .filter((item) => item.path);
+    }
+
+    function renderCaseNav() {
+      caseNavEl.innerHTML = "";
+      for (const traceCase of state.cases) {
+        const button = document.createElement("button");
+        button.textContent = traceCase.label;
+        button.addEventListener("click", () => loadCase(traceCase.id));
+        caseNavEl.appendChild(button);
+      }
+    }
+
+    async function loadCase(caseId) {
+      const traceCase = state.cases.find((item) => item.id === caseId);
+      if (!traceCase) return;
+
+      markActiveCase(caseId);
+      clearLoadedData();
+      state.activeCase = traceCase;
+
+      try {
+        setStatus(`正在读取 ${traceCase.path} ...`);
+        const manifest = await fetchJson("trace_manifest.json");
+        const promptTokens = await maybeFetchJson("prompt_tokens.json");
+        const stageNames = Object.keys(manifest.stages || {});
+        const stageEntries = await Promise.all(
+          stageNames.map(async (stageName) => {
+            const summary = await maybeFetchJson(`${stageName}/summary.json`);
+            return [stageName, summary || {}];
+          })
+        );
+
+        state.manifest = manifest;
+        state.promptTokens = promptTokens || {};
+        state.stageSummaries = new Map(stageEntries);
+
+        renderSummary();
+        renderStageNav(stageNames);
+
+        if (stageNames.length) {
+          summarySectionEl.classList.remove("hidden");
+          stageSectionEl.classList.remove("hidden");
+          await activateStage(stageNames[0]);
+        } else {
+          summarySectionEl.classList.remove("hidden");
+          stageSectionEl.classList.remove("hidden");
+          stageRootEl.innerHTML = `<div class="empty">这个 trace 没有 stage 数据。</div>`;
+        }
+
+        setStatus(`已加载 ${traceCase.label} (${traceCase.path})`);
+      } catch (error) {
+        clearLoadedData();
+        state.activeCase = traceCase;
+        setStatus(`加载失败：${error.message || error}`, true);
+      }
+    }
+
+    function clearLoadedData() {
+      state.activeStage = null;
+      state.manifest = null;
+      state.promptTokens = null;
+      state.stageSummaries = new Map();
+      summarySectionEl.classList.add("hidden");
+      stageSectionEl.classList.add("hidden");
+      promptEl.textContent = "";
+      tokenCloudEl.innerHTML = "";
+      overviewEl.innerHTML = "";
+      stageNavEl.innerHTML = "";
+      stageRootEl.innerHTML = "";
+    }
+
+    function markActiveCase(caseId) {
+      Array.from(caseNavEl.children).forEach((button, index) => {
+        button.classList.toggle("active", state.cases[index]?.id === caseId);
+      });
+    }
+
+    function renderSummary() {
+      const manifest = state.manifest || {};
+      const promptTokens = state.promptTokens || {};
+      const tokens = manifest.token_labels || promptTokens.display_tokens || [];
+      const stageNames = Object.keys(manifest.stages || {});
+      const selectedMapCount = stageNames.reduce((sum, stageName) => {
+        const stage = manifest.stages?.[stageName] || {};
+        return sum + (stage.selected_maps || []).length;
+      }, 0);
+      const focusTokenCount = stageNames.reduce((sum, stageName) => {
+        const summary = state.stageSummaries.get(stageName) || {};
+        return sum + ((summary.focus_token_labels || []).length);
+      }, 0);
+
+      promptEl.textContent = manifest.prompt || promptTokens.prompt || "";
+      tokenCloudEl.innerHTML = tokens
+        .map((token) => `<span class="token">${escapeHtml(token)}</span>`)
+        .join("");
+
+      overviewEl.innerHTML = [
+        ["Trace Path", state.activeCase?.path || ""],
+        ["Prompt Tokens", String(tokens.length)],
+        ["Stages", String(stageNames.length)],
+        ["Selected Maps", String(selectedMapCount)],
+        ["Focus Tokens", String(focusTokenCount)],
+        ["Case Label", state.activeCase?.label || ""],
+      ]
+        .map(([name, value]) => `
+          <div class="metric">
+            <span class="metric-name">${escapeHtml(name)}</span>
+            <span class="metric-value">${escapeHtml(value)}</span>
+          </div>
+        `)
+        .join("");
+    }
+
+    function renderStageNav(stageNames) {
+      stageNavEl.innerHTML = "";
+      for (const stageName of stageNames) {
+        const button = document.createElement("button");
+        button.textContent = stageName;
+        button.addEventListener("click", () => activateStage(stageName));
+        stageNavEl.appendChild(button);
+      }
+    }
+
+    async function activateStage(stageName) {
+      state.activeStage = stageName;
+      Array.from(stageNavEl.children).forEach((button) => {
+        button.classList.toggle("active", button.textContent === stageName);
+      });
+      await renderStage(stageName);
+    }
+
+    async function renderStage(stageName) {
+      const stageMeta = state.manifest?.stages?.[stageName] || {};
+      const summary = state.stageSummaries.get(stageName) || {};
+      const focusEntries = buildFocusEntries(stageName, summary);
+      const focusCards = await Promise.all(focusEntries.map((entry) => renderFocusCard(entry)));
+
+      stageRootEl.innerHTML = `
+        <article class="stage-panel">
+          <div>
+            <h3 class="stage-title">${escapeHtml(stageName)}</h3>
+            <div class="badge-row">
+              <span class="badge">Query Type: ${escapeHtml(summary.query_type || "unknown")}</span>
+              <span class="badge">Steps: ${escapeHtml(summary.total_steps ?? "?")}</span>
+              <span class="badge">Blocks: ${escapeHtml(summary.num_blocks ?? "?")}</span>
+            </div>
+          </div>
+
+          <div class="stage-overview">
+            ${renderImageCard(`${stageName}/step_token_heatmap.png`, "Step Token Heatmap")}
+            ${renderImageCard(`${stageName}/final_step_block_token_heatmap.png`, "Final-Step Block Heatmap")}
+            ${renderImageCard(`${stageName}/focus_token_step_curves.png`, "Focus Token Curves")}
+            <div class="image-card">
+              <p class="card-label">Focus Tokens</p>
+              ${(summary.focus_token_labels || []).length
+                ? `<div class="token-cloud">${summary.focus_token_labels.map((label) => `<span class="token">${escapeHtml(label)}</span>`).join("")}</div>`
+                : `<div class="empty">这一 stage 没有 focus token 摘要。</div>`}
+            </div>
+          </div>
+
+          <div style="margin-top: 24px;">
+            <p class="card-label">Focus Token Views</p>
+            ${focusCards.length
+              ? `<div class="focus-grid">${focusCards.join("")}</div>`
+              : `<div class="empty">这一 stage 没有配置 focus token 视图。</div>`}
+          </div>
+
+          <div style="margin-top: 24px;">
+            <p class="card-label">Selected Raw Attention Maps</p>
+            ${(stageMeta.selected_maps || []).length
+              ? `<div class="raw-grid">${renderRawMapCards(stageMeta.selected_maps)}</div>`
+              : `<div class="empty">manifest 里没有 selected raw maps。</div>`}
+          </div>
+        </article>
+      `;
+
+      attachImageFallbacks(stageRootEl);
+    }
+
+    function buildFocusEntries(stageName, summary) {
+      const indices = summary.focus_token_indices || [];
+      const labels = summary.focus_token_labels || [];
+      return indices.map((tokenIndex, index) => {
+        const label = labels[index] || `token_${tokenIndex}`;
+        return {
+          tokenIndex,
+          tokenLabel: label,
+          tokenDir: `${stageName}/token_${String(tokenIndex).padStart(2, "0")}_${sanitizeName(label)}`,
+        };
+      });
+    }
+
+    async function renderFocusCard(entry) {
+      const topJson = await maybeFetchJson(`${entry.tokenDir}/top_spatial_tokens.json`);
+      const topItems = topJson?.items || [];
+
+      const topItemsHtml = topItems.length
+        ? `
+          <div class="top-list">
+            ${topItems.map((item) => `
+              <div class="top-item">
+                <strong>Rank ${escapeHtml(item.rank)} · coord ${escapeHtml(formatCoord(item.coord))}</strong>
+                <span>focus attention: ${escapeHtml(formatScore(item.focus_token_attention))}</span>
+                <div style="margin-top: 10px;">
+                  ${renderImageTag(`${entry.tokenDir}/top_spatial_rank_${String(item.rank).padStart(2, "0")}_text_distribution.png`, `Top spatial rank ${item.rank}`)}
+                </div>
+              </div>
+            `).join("")}
+          </div>
+        `
+        : `<div class="empty">没有 top spatial token 摘要。</div>`;
+
+      return `
+        <article class="focus-card">
+          <span class="token-pill">${escapeHtml(entry.tokenLabel)}</span>
+          <h3>${escapeHtml(`token_${String(entry.tokenIndex).padStart(2, "0")}`)}</h3>
+          <div class="image-stack">
+            ${renderImageTag(`${entry.tokenDir}/step_progress.png`, `${entry.tokenLabel} step progress`)}
+            ${renderImageTag(`${entry.tokenDir}/block_progress.png`, `${entry.tokenLabel} block progress`)}
+          </div>
+          ${topItemsHtml}
+        </article>
+      `;
+    }
+
+    function renderRawMapCards(items) {
+      return items.map((item) => `
+        <div class="raw-item">
+          <strong>${escapeHtml(item.module_name || "cross_attn")}</strong>
+          <span>step ${escapeHtml(item.key?.[0] ?? "?")} · block ${escapeHtml(item.key?.[1] ?? "?")}</span>
+          <code class="raw-code">${escapeHtml(item.npz || "")}</code>
+          <div class="link-row">
+            ${item.json ? `<a class="chip-link" href="${escapeHtml(resolvePath(item.json))}" target="_blank" rel="noopener">Open JSON</a>` : ""}
+            ${item.npz ? `<a class="chip-link" href="${escapeHtml(resolvePath(item.npz))}" target="_blank" rel="noopener">Open NPZ</a>` : ""}
+          </div>
+        </div>
+      `).join("");
+    }
+
+    function renderImageCard(relativePath, label) {
+      return `
+        <div class="image-card">
+          <p class="card-label">${escapeHtml(label)}</p>
+          ${renderImageTag(relativePath, label)}
+        </div>
+      `;
+    }
+
+    function renderImageTag(relativePath, label) {
+      const resolved = resolvePath(relativePath);
+      return `<img src="${escapeHtml(resolved)}" alt="${escapeHtml(label)}" data-fallback="${escapeHtml(relativePath)}" loading="lazy">`;
+    }
+
+    function attachImageFallbacks(root) {
+      root.querySelectorAll("img[data-fallback]").forEach((img) => {
+        img.addEventListener("error", () => {
+          const fallback = document.createElement("div");
+          fallback.className = "empty";
+          fallback.textContent = `缺少 ${img.getAttribute("data-fallback")}`;
+          img.replaceWith(fallback);
+        }, { once: true });
+      });
+    }
+
+    async function fetchJson(relativePath) {
+      const response = await fetch(resolvePath(relativePath), { cache: "no-store" });
+      if (!response.ok) {
+        throw new Error(`读取 ${relativePath} 失败 (${response.status})`);
+      }
+      return response.json();
+    }
+
+    async function maybeFetchJson(relativePath) {
+      try {
+        return await fetchJson(relativePath);
+      } catch (error) {
+        return null;
+      }
+    }
+
+    function resolvePath(relativePath) {
+      const basePath = normalizeBasePath(state.activeCase?.path || "");
+      const cleanRelative = String(relativePath || "").replace(/^\/+/, "");
+      return cleanRelative ? `${basePath}/${cleanRelative}` : basePath;
+    }
+
+    function setStatus(text, isError = false) {
+      statusEl.textContent = text;
+      statusEl.classList.toggle("error", Boolean(isError));
+    }
+
+    function normalizeBasePath(value) {
+      return String(value || "").replace(/\\/g, "/").replace(/\/+$/, "");
+    }
+
+    function guessCaseLabel(path) {
+      const parts = normalizeBasePath(path).split("/").filter(Boolean);
+      if (parts.length >= 2) {
+        return parts[parts.length - 2];
+      }
+      return path || "trace";
+    }
+
+    function sanitizeName(text) {
+      const cleaned = String(text || "")
+        .trim()
+        .toLowerCase()
+        .replace(/<\/w>/g, "")
+        .replace(/[^0-9a-zA-Z_\u4e00-\u9fff]+/g, "_")
+        .replace(/^_+|_+$/g, "");
+      return cleaned || "token";
+    }
+
+    function formatCoord(coord) {
+      return Array.isArray(coord) ? `[${coord.join(", ")}]` : "?";
+    }
+
+    function formatScore(value) {
+      const num = Number(value);
+      return Number.isFinite(num) ? num.toFixed(4) : String(value ?? "?");
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+  </script>
+</body>
+</html>
