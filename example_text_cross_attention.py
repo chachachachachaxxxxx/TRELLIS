@@ -1,11 +1,24 @@
 #!/usr/bin/env python3
 """
-Trace and visualize cross-attention alignment between text tokens and spatial tokens
-in TRELLIS text-to-3D generation.
+在 TRELLIS 文本生成 3D 的流程中，追踪并可视化文本 token 与空间 token 的 cross-attention。
 
-This script does not modify any existing TRELLIS source files. It monkey patches the
-loaded model instances at runtime, captures cross-attention summaries, and writes
-raw artifacts plus readable visualizations under output/<case_name>/cross_attention_trace/.
+使用方法：
+1. 先进入已经安装好 TRELLIS 及其依赖的 Python 环境。
+2. 直接运行：
+   python example_text_cross_attention.py --prompt "a red chair"
+3. 如需额外关注某些词，可以指定：
+   python example_text_cross_attention.py --prompt "a red chair" --focus-words chair,red
+4. 运行完成后，到下面目录查看导出的热力图、注意力 map 和说明文件：
+   output/<case_name>/cross_attention_trace/
+
+常用参数：
+- --model: 选择模型路径或 Hugging Face repo。
+- --trace-stages: 选择追踪 sparse_structure、slat 或二者。
+- --ss-steps / --slat-steps: 控制两个阶段的采样步数。
+- --topk-focus-tokens: 自动选择并重点展示多少个 token。
+
+该脚本不会修改 TRELLIS 原始源码，而是通过运行时 monkey patch 的方式捕获注意力摘要，
+并将原始数据和可读的可视化结果保存到 output/<case_name>/cross_attention_trace/。
 """
 
 import os
@@ -13,6 +26,7 @@ import sys
 
 
 def _peek_arg(flag: str, default: str = "") -> str:
+    """在 argparse 初始化前，先从命令行里取出某个参数值。"""
     if flag in sys.argv:
         idx = sys.argv.index(flag)
         if idx + 1 < len(sys.argv):
@@ -49,16 +63,19 @@ from trellis.pipelines import TrellisTextTo3DPipeline
 
 
 def ensure_dir(path: Path) -> Path:
+    """确保目录存在，并返回该目录路径，便于链式调用。"""
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def save_json(path: Path, data: dict) -> None:
+    """以 UTF-8 编码保存 JSON 文件，方便后续查看和调试。"""
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
 def sanitize_name(text: str, max_len: int = 48) -> str:
+    """把任意文本清洗成适合做文件名或目录名的短字符串。"""
     text = text.strip().lower()
     text = re.sub(r"</w>", "", text)
     text = re.sub(r"[^0-9a-zA-Z_\u4e00-\u9fff]+", "_", text)
@@ -69,11 +86,13 @@ def sanitize_name(text: str, max_len: int = 48) -> str:
 
 
 def tensor_signature(tensor: torch.Tensor, rows: int = 3, cols: int = 8) -> np.ndarray:
+    """截取张量前部的小块样本，作为区分 cond / neg_cond 的轻量签名。"""
     sample = tensor[:1, :rows, :cols].detach().float().cpu().numpy()
     return sample
 
 
 def clean_token_label(token: str) -> str:
+    """把 tokenizer 的原始 token 处理成更适合展示的标签。"""
     label = token.replace("</w>", "")
     label = label.replace("<|startoftext|>", "[BOS]")
     label = label.replace("<|endoftext|>", "[EOS]")
@@ -87,12 +106,14 @@ def build_word_groups(
     special_mask: List[bool],
     valid_token_count: int,
 ) -> Tuple[List[str], List[List[int]]]:
+    """把 BPE token 按词边界合并成单词级分组，便于做词级注意力统计。"""
     word_labels: List[str] = []
     word_token_indices: List[List[int]] = []
     current_label_parts: List[str] = []
     current_indices: List[int] = []
 
     def flush_current() -> None:
+        """把当前正在累积的 token 片段提交成一个完整词。"""
         if not current_indices:
             return
         label = "".join(current_label_parts).strip()
@@ -134,6 +155,7 @@ def build_subword_groups(
     special_mask: List[bool],
     valid_token_count: int,
 ) -> Tuple[List[str], List[List[int]], Dict[int, int]]:
+    """为每个有效 token 建立一对一的 subword 分组及反向索引。"""
     subword_labels: List[str] = []
     subword_token_indices: List[List[int]] = []
     token_to_subword_group: Dict[int, int] = {}
@@ -149,6 +171,7 @@ def build_subword_groups(
 
 
 def build_token_metadata(tokenizer, prompt: str) -> dict:
+    """对 prompt 做分词，并生成后续导出可视化所需的 token 元信息。"""
     encoding = tokenizer(
         [prompt],
         max_length=77,
@@ -192,6 +215,7 @@ def build_token_metadata(tokenizer, prompt: str) -> dict:
 
 
 def select_key_indices(total: int, max_items: int = 3) -> List[int]:
+    """从一个长度为 total 的序列里均匀挑出若干关键索引。"""
     if total <= 0:
         return []
     if total <= max_items:
@@ -207,7 +231,28 @@ def select_key_indices(total: int, max_items: int = 3) -> List[int]:
     return indices
 
 
+def build_content_token_index_info(
+    special_mask: List[bool],
+    valid_token_count: int,
+) -> Tuple[List[int], List[int], Dict[int, int]]:
+    """建立内容 token / 特殊 token 的索引及内容 token 的反向映射。"""
+    content_token_indices = [
+        idx for idx in range(valid_token_count)
+        if not special_mask[idx]
+    ]
+    special_token_indices = [
+        idx for idx in range(valid_token_count)
+        if special_mask[idx]
+    ]
+    full_to_content_index = {
+        token_idx: content_idx
+        for content_idx, token_idx in enumerate(content_token_indices)
+    }
+    return content_token_indices, special_token_indices, full_to_content_index
+
+
 def dense_query_coords(resolution: int, patch_size: int, batch_size: int) -> List[np.ndarray]:
+    """根据 dense 网格分辨率恢复每个 query 对应的三维坐标。"""
     side = resolution // patch_size
     coords = torch.stack(
         torch.meshgrid(
@@ -227,7 +272,9 @@ def compute_headmean_attention(
     k: torch.Tensor,
     query_chunk: int,
     keep_map: bool,
-) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    content_token_indices: List[int],
+) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
+    """分块计算 query 对文本 token 的平均注意力，并按需保留完整 attention map。"""
     q = q.detach()
     k = k.detach()
     num_queries = q.shape[0]
@@ -237,7 +284,15 @@ def compute_headmean_attention(
 
     k_float = k.float()
     token_sum = np.zeros((num_tokens,), dtype=np.float64)
+    token_sum_content_renorm = np.zeros((num_tokens,), dtype=np.float64)
     map_chunks: List[np.ndarray] = []
+    content_token_index_tensor: Optional[torch.Tensor] = None
+    if content_token_indices:
+        content_token_index_tensor = torch.as_tensor(
+            content_token_indices,
+            device=q.device,
+            dtype=torch.long,
+        )
 
     for start in range(0, num_queries, query_chunk):
         end = min(start + query_chunk, num_queries)
@@ -246,11 +301,20 @@ def compute_headmean_attention(
         attn = torch.softmax(scores, dim=-1)
         attn_mean = attn.mean(dim=1)
         token_sum += attn_mean.sum(dim=0).cpu().numpy()
+
+        if content_token_index_tensor is not None and content_token_index_tensor.numel() > 0:
+            content_attn = attn_mean.index_select(dim=-1, index=content_token_index_tensor)
+            content_denom = content_attn.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+            content_attn_renorm = content_attn / content_denom
+            token_sum_content_renorm[content_token_indices] += (
+                content_attn_renorm.sum(dim=0).cpu().numpy()
+            )
+
         if keep_map:
             map_chunks.append(attn_mean.cpu().to(torch.float16).numpy())
 
     attn_map = np.concatenate(map_chunks, axis=0) if keep_map else None
-    return token_sum, attn_map
+    return token_sum, token_sum_content_renorm, attn_map
 
 
 def save_heatmap(
@@ -262,6 +326,7 @@ def save_heatmap(
     xlabel: str,
     ylabel: str,
 ) -> None:
+    """把二维注意力统计保存成热力图。"""
     fig_w = max(12, 0.28 * len(x_labels))
     fig_h = max(4, 0.35 * len(y_labels))
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
@@ -286,6 +351,7 @@ def save_token_curves(
     path: Path,
     title: str,
 ) -> None:
+    """绘制若干重点 token 在采样步骤上的注意力曲线。"""
     fig, ax = plt.subplots(figsize=(12, 5))
     x = np.arange(step_token_mean.shape[0])
     for token_idx in token_indices:
@@ -305,6 +371,7 @@ def save_spatial_panels(
     path: Path,
     title: str,
 ) -> None:
+    """把多个空间注意力分布并排绘制成 3D 面板图。"""
     if not panels:
         return
     fig = plt.figure(figsize=(6 * len(panels), 5.5))
@@ -343,6 +410,7 @@ def save_spatial_panels(
 
 
 def save_bar(values: np.ndarray, labels: List[str], path: Path, title: str) -> None:
+    """将单个空间位置对应的文本注意力分布画成柱状图。"""
     values = np.asarray(values).reshape(-1)
     if values.shape[0] != len(labels):
         raise ValueError(
@@ -362,11 +430,32 @@ def save_bar(values: np.ndarray, labels: List[str], path: Path, title: str) -> N
     plt.close(fig)
 
 
+def slice_token_values(values: np.ndarray, token_indices: List[int]) -> np.ndarray:
+    """按指定 token 索引抽取最后一维，得到内容 token 子集。"""
+    array = np.asarray(values)
+    if not token_indices:
+        return np.zeros(array.shape[:-1] + (0,), dtype=np.float32)
+    return np.asarray(array[..., token_indices], dtype=np.float32)
+
+
+def renormalize_token_values(
+    values: np.ndarray,
+    eps: float = 1e-12,
+) -> np.ndarray:
+    """对最后一维重新归一化；若该维和为 0，则保持为 0。"""
+    array = np.asarray(values, dtype=np.float32)
+    denom = array.sum(axis=-1, keepdims=True)
+    safe = np.where(denom > eps, denom, 1.0)
+    renorm = array / safe
+    return np.where(denom > eps, renorm, 0.0).astype(np.float32)
+
+
 def aggregate_token_values_by_groups(
     values: np.ndarray,
     token_groups: List[List[int]],
     reduce: str = "mean",
 ) -> np.ndarray:
+    """按给定 token 分组把 token 级统计聚合成 subword 或 word 级统计。"""
     array = np.asarray(values)
     if array.ndim not in (1, 2):
         raise ValueError(
@@ -398,6 +487,7 @@ def resolve_focus_word_indices(
     focus_words: List[str],
     topk: int,
 ) -> List[int]:
+    """解析用户指定的关注词；若未命中，则回退到得分最高的若干词。"""
     requested: List[int] = []
     lowered_labels = [label.lower() for label in word_labels]
     for word in focus_words:
@@ -419,6 +509,7 @@ def resolve_focus_word_indices(
 
 
 def compute_attention_vmax(values_list: List[np.ndarray], percentile: float = 99.5) -> float:
+    """为多张注意力图计算共享的颜色上限，避免单图极值主导显示。"""
     flattened = []
     for values in values_list:
         array = np.asarray(values).reshape(-1)
@@ -439,6 +530,7 @@ def plot_spatial_attention_subplot(
     vmax: float,
     point_size: float = 5.0,
 ) -> None:
+    """在给定的 3D 子图上绘制一张空间注意力散点图。"""
     coords = np.asarray(coords)
     values = np.asarray(values).reshape(-1)
     if coords.shape[0] != values.shape[0]:
@@ -484,6 +576,7 @@ def save_word_attention_overview(
     title: str,
     block_index: int,
 ) -> None:
+    """导出总览图：上方展示平均词级注意力，下方展示重点词的分步变化。"""
     if avg_word_maps.size == 0 or not word_labels:
         return
 
@@ -580,6 +673,7 @@ def resolve_focus_token_indices(
     focus_words: List[str],
     topk: int,
 ) -> List[int]:
+    """解析需要重点查看的 token 索引；未指定时自动挑选高注意力 token。"""
     display_tokens = token_meta["display_tokens"]
     special_mask = token_meta["special_mask"]
     valid_token_count = token_meta["valid_token_count"]
@@ -614,6 +708,8 @@ def resolve_focus_token_indices(
 
 
 class CrossAttentionTracer:
+    """在运行时挂钩 cross-attention 模块，并导出聚合统计与可视化结果。"""
+
     def __init__(
         self,
         token_meta: dict,
@@ -622,7 +718,17 @@ class CrossAttentionTracer:
         topk_focus_tokens: int,
         topk_spatial: int,
     ):
+        """初始化追踪器的全局配置与待恢复的 monkey patch 栈。"""
         self.token_meta = token_meta
+        self.valid_token_count = int(token_meta["valid_token_count"])
+        (
+            self.content_token_indices,
+            self.special_token_indices,
+            self.full_to_content_index,
+        ) = build_content_token_index_info(
+            special_mask=token_meta["special_mask"],
+            valid_token_count=self.valid_token_count,
+        )
         self.query_chunk = query_chunk
         self.focus_words = focus_words
         self.topk_focus_tokens = topk_focus_tokens
@@ -641,6 +747,7 @@ class CrossAttentionTracer:
         enabled: bool,
         query_type: str,
     ) -> None:
+        """为某个采样阶段建立状态，并在需要时把 hook 挂到模型上。"""
         num_blocks = len(getattr(model, "blocks"))
         self.stage_states[stage_name] = {
             "enabled": enabled,
@@ -657,10 +764,15 @@ class CrossAttentionTracer:
                 (total_steps, num_blocks, self.token_meta["valid_token_count"]),
                 dtype=np.float64,
             ),
+            "step_block_token_sum_content_renorm": np.zeros(
+                (total_steps, num_blocks, self.token_meta["valid_token_count"]),
+                dtype=np.float64,
+            ),
             "step_block_query_count": np.zeros((total_steps, num_blocks), dtype=np.int64),
             "selected_maps": {},
             "overview_block_index": num_blocks - 1,
             "overview_sum_map": None,
+            "overview_sum_map_content_renorm": None,
             "overview_count": 0,
             "overview_coords": None,
         }
@@ -669,11 +781,13 @@ class CrossAttentionTracer:
             self._patch_cross_modules(stage_name, model)
 
     def restore(self) -> None:
+        """恢复所有被替换过的 forward，确保脚本结束后模型状态干净。"""
         while self._restore_stack:
             obj, attr, value = self._restore_stack.pop()
             setattr(obj, attr, value)
 
     def _infer_pass_kind(self, stage_name: str, cond: torch.Tensor) -> str:
+        """根据 cond 的签名判断当前 forward 属于条件分支还是负条件分支。"""
         state = self.stage_states[stage_name]
         current_sig = tensor_signature(cond)
         dist_cond = float(np.max(np.abs(current_sig - state["cond_signature"])))
@@ -681,11 +795,13 @@ class CrossAttentionTracer:
         return "cond" if dist_cond <= dist_neg else "neg"
 
     def _patch_model_forward(self, stage_name: str, model: torch.nn.Module) -> None:
+        """包装 stage 级 forward，用来记录当前采样步和上下文信息。"""
         original_forward = model.forward
         self._restore_stack.append((model, "forward", original_forward))
         tracer = self
 
         def wrapped_forward(model_self, x, t, cond):
+            """在原始 forward 前后维护当前 tracing 上下文。"""
             state = tracer.stage_states[stage_name]
             pass_kind = tracer._infer_pass_kind(stage_name, cond)
             if pass_kind == "cond":
@@ -711,6 +827,7 @@ class CrossAttentionTracer:
         model.forward = types.MethodType(wrapped_forward, model)
 
     def _patch_cross_modules(self, stage_name: str, model: torch.nn.Module) -> None:
+        """遍历模型里的 cross-attention 模块，并按 dense / sparse 分别挂钩。"""
         block_pattern = re.compile(r"blocks\.(\d+)\.cross_attn$")
         sparse_idx = 0
         dense_idx = 0
@@ -734,11 +851,13 @@ class CrossAttentionTracer:
         block_index: int,
         module: MultiHeadAttention,
     ) -> None:
+        """包装 dense cross-attention 模块，在前向时拦截 q/k 并记录统计。"""
         original_forward = module.forward
         self._restore_stack.append((module, "forward", original_forward))
         tracer = self
 
         def wrapped_forward(attn_self, x, context=None, indices=None):
+            """复用原始 attention 计算路径，同时额外保存 dense 注意力摘要。"""
             batch_size, num_queries, _ = x.shape
             q = attn_self.to_q(x).reshape(batch_size, num_queries, attn_self.num_heads, -1)
             kv = attn_self.to_kv(context).reshape(batch_size, context.shape[1], 2, attn_self.num_heads, -1)
@@ -761,11 +880,13 @@ class CrossAttentionTracer:
         block_index: int,
         module: SparseMultiHeadAttention,
     ) -> None:
+        """包装 sparse cross-attention 模块，在前向时拦截 q/k 并记录统计。"""
         original_forward = module.forward
         self._restore_stack.append((module, "forward", original_forward))
         tracer = self
 
         def wrapped_forward(attn_self, x, context=None):
+            """复用原始 sparse attention 计算路径，同时额外保存稀疏注意力摘要。"""
             q = attn_self._linear(attn_self.to_q, x)
             q = attn_self._reshape_chs(q, (attn_self.num_heads, -1))
             kv = attn_self._linear(attn_self.to_kv, context)
@@ -786,6 +907,7 @@ class CrossAttentionTracer:
         module.forward = types.MethodType(wrapped_forward, module)
 
     def _should_keep_map(self, stage_name: str, step_index: int, block_index: int) -> bool:
+        """判断当前 step / block 是否属于需要完整导出的采样子集。"""
         state = self.stage_states[stage_name]
         return (
             step_index in state["selected_steps"]
@@ -801,6 +923,7 @@ class CrossAttentionTracer:
         k: torch.Tensor,
         batch_size: int,
     ) -> None:
+        """记录 dense cross-attention 的 token 统计和可选的完整 map。"""
         ctx = self.current_forward_context
         if ctx is None or ctx["stage"] != stage_name or ctx["pass_kind"] != "cond":
             return
@@ -819,13 +942,17 @@ class CrossAttentionTracer:
         )
 
         for batch_idx in range(batch_size):
-            token_sum, attn_map = compute_headmean_attention(
+            token_sum, token_sum_content_renorm, attn_map = compute_headmean_attention(
                 q=q[batch_idx],
                 k=k[batch_idx],
                 query_chunk=self.query_chunk,
                 keep_map=keep_map and batch_idx == 0,
+                content_token_indices=self.content_token_indices,
             )
             state["step_block_token_sum"][step_index, block_index] += token_sum[:valid_token_count]
+            state["step_block_token_sum_content_renorm"][step_index, block_index] += (
+                token_sum_content_renorm[:valid_token_count]
+            )
             state["step_block_query_count"][step_index, block_index] += q.shape[1]
 
             if batch_idx == 0 and overview_map and attn_map is not None:
@@ -853,6 +980,7 @@ class CrossAttentionTracer:
         q: SparseTensor,
         k: torch.Tensor,
     ) -> None:
+        """记录 sparse cross-attention 的 token 统计和可选的完整 map。"""
         ctx = self.current_forward_context
         if ctx is None or ctx["stage"] != stage_name or ctx["pass_kind"] != "cond":
             return
@@ -866,13 +994,17 @@ class CrossAttentionTracer:
 
         for batch_idx in range(q.shape[0]):
             q_slice = q.feats[q.layout[batch_idx]]
-            token_sum, attn_map = compute_headmean_attention(
+            token_sum, token_sum_content_renorm, attn_map = compute_headmean_attention(
                 q=q_slice,
                 k=k[batch_idx],
                 query_chunk=self.query_chunk,
                 keep_map=keep_map and batch_idx == 0,
+                content_token_indices=self.content_token_indices,
             )
             state["step_block_token_sum"][step_index, block_index] += token_sum[:valid_token_count]
+            state["step_block_token_sum_content_renorm"][step_index, block_index] += (
+                token_sum_content_renorm[:valid_token_count]
+            )
             state["step_block_query_count"][step_index, block_index] += q_slice.shape[0]
 
             if batch_idx == 0 and overview_map and attn_map is not None:
@@ -899,33 +1031,53 @@ class CrossAttentionTracer:
         coords: np.ndarray,
         attn_map: np.ndarray,
     ) -> None:
+        """把某个 block 的 attention map 累加到总览统计里。"""
+        content_attn_map = slice_token_values(attn_map, self.content_token_indices)
+        content_attn_map_renorm = renormalize_token_values(content_attn_map)
+        attn_map_content_renorm_full = np.zeros_like(attn_map, dtype=np.float32)
+        if self.content_token_indices:
+            attn_map_content_renorm_full[:, self.content_token_indices] = content_attn_map_renorm
+
         if state["overview_sum_map"] is None:
             state["overview_sum_map"] = attn_map.astype(np.float32, copy=True)
+            state["overview_sum_map_content_renorm"] = attn_map_content_renorm_full
             state["overview_coords"] = np.asarray(coords, dtype=np.int16)
             state["overview_count"] = 1
             return
         if state["overview_sum_map"].shape != attn_map.shape:
             return
         state["overview_sum_map"] += attn_map.astype(np.float32, copy=False)
+        if state["overview_sum_map_content_renorm"] is None:
+            state["overview_sum_map_content_renorm"] = attn_map_content_renorm_full
+        elif state["overview_sum_map_content_renorm"].shape == attn_map_content_renorm_full.shape:
+            state["overview_sum_map_content_renorm"] += attn_map_content_renorm_full
         state["overview_count"] += 1
 
     def _dense_resolution_from_state(self, stage_name: str) -> int:
+        """读取 dense 阶段当前使用的网格分辨率。"""
         state = self.stage_states[stage_name]
         return int(state["dense_resolution"])
 
     def _dense_patch_size_from_state(self, stage_name: str) -> int:
+        """读取 dense 阶段当前使用的 patch 大小。"""
         state = self.stage_states[stage_name]
         return int(state["dense_patch_size"])
 
     def set_dense_grid_meta(self, stage_name: str, resolution: int, patch_size: int) -> None:
+        """补充 dense query 坐标恢复所需的网格元信息。"""
         state = self.stage_states[stage_name]
         state["dense_resolution"] = int(resolution)
         state["dense_patch_size"] = int(patch_size)
 
     def export(self, root_dir: Path) -> None:
-        token_labels = self.token_meta["display_tokens"][: self.token_meta["valid_token_count"]]
+        """把所有阶段的聚合统计、原始 map 和可视化结果导出到磁盘。"""
+        token_labels = self.token_meta["display_tokens"][: self.valid_token_count]
         special_mask = self.token_meta["special_mask"]
-        valid_token_count = self.token_meta["valid_token_count"]
+        valid_token_count = self.valid_token_count
+        content_token_indices = list(self.content_token_indices)
+        special_token_indices = list(self.special_token_indices)
+        content_token_labels = [token_labels[idx] for idx in content_token_indices]
+        special_token_labels = [token_labels[idx] for idx in special_token_indices]
         word_labels = list(self.token_meta.get("word_labels", []))
         word_token_indices = [list(group) for group in self.token_meta.get("word_token_indices", [])]
         subword_labels, subword_token_indices, token_to_subword_group = build_subword_groups(
@@ -936,6 +1088,14 @@ class CrossAttentionTracer:
         manifest = {
             "prompt": self.token_meta["prompt"],
             "token_labels": token_labels,
+            "content_token_indices": content_token_indices,
+            "content_token_labels": content_token_labels,
+            "special_token_indices": special_token_indices,
+            "special_token_labels": special_token_labels,
+            "attention_export_modes": {
+                "content_raw": "Normalize over all tokens first, then drop special tokens for display/export.",
+                "content_renorm": "Drop special tokens first, then renormalize remaining content-token attention to sum to 1.",
+            },
             "subword_labels": subword_labels,
             "word_labels": word_labels,
             "stages": {},
@@ -983,8 +1143,19 @@ class CrossAttentionTracer:
 
             stage_dir = ensure_dir(root_dir / stage_name)
             normalized = self._normalized_step_block_token_mean(state)
+            normalized_content_renorm = self._normalized_step_block_token_mean(state, renorm_content=True)
             step_token_mean = normalized.mean(axis=1)
             final_step_block_mean = normalized[-1]
+            step_token_mean_content_raw = slice_token_values(step_token_mean, content_token_indices)
+            final_step_block_mean_content_raw = slice_token_values(final_step_block_mean, content_token_indices)
+            step_token_mean_content_renorm = slice_token_values(
+                normalized_content_renorm.mean(axis=1),
+                content_token_indices,
+            )
+            final_step_block_mean_content_renorm = slice_token_values(
+                normalized_content_renorm[-1],
+                content_token_indices,
+            )
 
             save_json(
                 stage_dir / "summary.json",
@@ -995,6 +1166,14 @@ class CrossAttentionTracer:
                     "num_blocks": state["num_blocks"],
                     "selected_steps": state["selected_steps"],
                     "selected_blocks": state["selected_blocks"],
+                    "content_token_indices": content_token_indices,
+                    "content_token_labels": content_token_labels,
+                    "special_token_indices": special_token_indices,
+                    "special_token_labels": special_token_labels,
+                    "attention_export_modes": {
+                        "content_raw": "Normalize over all tokens first, then drop special tokens for display/export.",
+                        "content_renorm": "Drop special tokens first, then renormalize remaining content-token attention to sum to 1.",
+                    },
                     "focus_token_indices": focus_token_indices,
                     "focus_token_labels": [token_labels[i] for i in focus_token_indices],
                     "subword_labels": subword_labels,
@@ -1009,13 +1188,26 @@ class CrossAttentionTracer:
             )
             np.save(stage_dir / "step_token_mean.npy", step_token_mean.astype(np.float32))
             np.save(stage_dir / "final_step_block_token_mean.npy", final_step_block_mean.astype(np.float32))
+            np.save(stage_dir / "step_token_mean_content_raw.npy", step_token_mean_content_raw.astype(np.float32))
+            np.save(
+                stage_dir / "final_step_block_token_mean_content_raw.npy",
+                final_step_block_mean_content_raw.astype(np.float32),
+            )
+            np.save(
+                stage_dir / "step_token_mean_content_renorm.npy",
+                step_token_mean_content_renorm.astype(np.float32),
+            )
+            np.save(
+                stage_dir / "final_step_block_token_mean_content_renorm.npy",
+                final_step_block_mean_content_renorm.astype(np.float32),
+            )
 
             save_heatmap(
                 step_token_mean,
                 token_labels,
                 [f"step_{i:02d}" for i in range(step_token_mean.shape[0])],
                 stage_dir / "step_token_heatmap.png",
-                title=f"{stage_name}: mean token attention over sampling steps",
+                title=f"{stage_name}: mean token attention over sampling steps (all valid tokens)",
                 xlabel="Text Token",
                 ylabel="Sampling Step",
             )
@@ -1024,8 +1216,44 @@ class CrossAttentionTracer:
                 token_labels,
                 [f"block_{i:02d}" for i in range(final_step_block_mean.shape[0])],
                 stage_dir / "final_step_block_token_heatmap.png",
-                title=f"{stage_name}: final-step token attention over blocks",
+                title=f"{stage_name}: final-step token attention over blocks (all valid tokens)",
                 xlabel="Text Token",
+                ylabel="Transformer Block",
+            )
+            save_heatmap(
+                step_token_mean_content_raw,
+                content_token_labels,
+                [f"step_{i:02d}" for i in range(step_token_mean_content_raw.shape[0])],
+                stage_dir / "step_token_heatmap_content_raw.png",
+                title=f"{stage_name}: content-token attention over sampling steps (drop special tokens only)",
+                xlabel="Content Token",
+                ylabel="Sampling Step",
+            )
+            save_heatmap(
+                final_step_block_mean_content_raw,
+                content_token_labels,
+                [f"block_{i:02d}" for i in range(final_step_block_mean_content_raw.shape[0])],
+                stage_dir / "final_step_block_token_heatmap_content_raw.png",
+                title=f"{stage_name}: final-step content-token attention over blocks (drop special tokens only)",
+                xlabel="Content Token",
+                ylabel="Transformer Block",
+            )
+            save_heatmap(
+                step_token_mean_content_renorm,
+                content_token_labels,
+                [f"step_{i:02d}" for i in range(step_token_mean_content_renorm.shape[0])],
+                stage_dir / "step_token_heatmap_content_renorm.png",
+                title=f"{stage_name}: content-token attention over sampling steps (renorm after dropping special tokens)",
+                xlabel="Content Token",
+                ylabel="Sampling Step",
+            )
+            save_heatmap(
+                final_step_block_mean_content_renorm,
+                content_token_labels,
+                [f"block_{i:02d}" for i in range(final_step_block_mean_content_renorm.shape[0])],
+                stage_dir / "final_step_block_token_heatmap_content_renorm.png",
+                title=f"{stage_name}: final-step content-token attention over blocks (renorm after dropping special tokens)",
+                xlabel="Content Token",
                 ylabel="Transformer Block",
             )
 
@@ -1037,16 +1265,39 @@ class CrossAttentionTracer:
                     stage_dir / "focus_token_step_curves.png",
                     title=f"{stage_name}: focus-token attention across steps",
                 )
+                focus_content_token_indices = [
+                    self.full_to_content_index[token_idx]
+                    for token_idx in focus_token_indices
+                    if token_idx in self.full_to_content_index
+                ]
+                save_token_curves(
+                    step_token_mean_content_raw,
+                    focus_content_token_indices,
+                    content_token_labels,
+                    stage_dir / "focus_token_step_curves_content_raw.png",
+                    title=f"{stage_name}: focus-token attention across steps (drop special tokens only)",
+                )
+                save_token_curves(
+                    step_token_mean_content_renorm,
+                    focus_content_token_indices,
+                    content_token_labels,
+                    stage_dir / "focus_token_step_curves_content_renorm.png",
+                    title=f"{stage_name}: focus-token attention across steps (renorm after dropping special tokens)",
+                )
 
             selected_map_meta = []
             for (step_index, block_index), item in sorted(state["selected_maps"].items()):
                 raw_dir = ensure_dir(stage_dir / "raw_maps")
                 attn_map = item["attn_map"][:, : self.token_meta["valid_token_count"]]
+                content_attn_map_raw = slice_token_values(attn_map, content_token_indices)
+                content_attn_map_renorm = renormalize_token_values(content_attn_map_raw)
                 coords = item["coords"]
                 base = f"step_{step_index:02d}_block_{block_index:02d}"
                 np.savez_compressed(
                     raw_dir / f"{base}.npz",
                     attn_map=attn_map.astype(np.float16),
+                    content_attn_map_raw=content_attn_map_raw.astype(np.float16),
+                    content_attn_map_renorm=content_attn_map_renorm.astype(np.float16),
                     coords=coords.astype(np.int16),
                 )
                 save_json(
@@ -1059,6 +1310,13 @@ class CrossAttentionTracer:
                         "timestep": item["timestep"],
                         "num_queries": int(attn_map.shape[0]),
                         "num_tokens": int(attn_map.shape[1]),
+                        "content_token_indices": content_token_indices,
+                        "content_token_labels": content_token_labels,
+                        "arrays": {
+                            "attn_map": "Raw attention over all valid tokens, including special tokens.",
+                            "content_attn_map_raw": "Attention over content tokens after dropping special tokens only.",
+                            "content_attn_map_renorm": "Attention over content tokens after dropping special tokens and renormalizing per query.",
+                        },
                     },
                 )
                 selected_map_meta.append(
@@ -1083,9 +1341,21 @@ class CrossAttentionTracer:
                 group_labels=subword_labels,
                 group_token_indices=subword_token_indices,
                 focus_group_indices=focus_subword_indices,
-                file_prefix="subword_attention",
+                file_prefix="subword_attention_content_raw",
                 title_label="subword-to-3D",
                 aggregation_name="bpe_subword",
+                renorm_content=False,
+            )
+            subword_renorm_overview_paths = self._export_group_overview(
+                stage_dir=stage_dir,
+                state=state,
+                group_labels=subword_labels,
+                group_token_indices=subword_token_indices,
+                focus_group_indices=focus_subword_indices,
+                file_prefix="subword_attention_content_renorm",
+                title_label="subword-to-3D",
+                aggregation_name="bpe_subword",
+                renorm_content=True,
             )
             overview_paths = self._export_word_overview(
                 stage_dir=stage_dir,
@@ -1093,23 +1363,50 @@ class CrossAttentionTracer:
                 word_labels=word_labels,
                 word_token_indices=word_token_indices,
                 focus_word_indices=focus_word_indices,
+                renorm_content=False,
+            )
+            overview_renorm_paths = self._export_word_overview(
+                stage_dir=stage_dir,
+                state=state,
+                word_labels=word_labels,
+                word_token_indices=word_token_indices,
+                focus_word_indices=focus_word_indices,
+                renorm_content=True,
             )
 
             manifest["stages"][stage_name] = {
                 "summary": str((stage_dir / "summary.json").relative_to(root_dir)),
                 "step_token_mean": str((stage_dir / "step_token_mean.npy").relative_to(root_dir)),
                 "final_step_block_token_mean": str((stage_dir / "final_step_block_token_mean.npy").relative_to(root_dir)),
+                "step_token_mean_content_raw": str((stage_dir / "step_token_mean_content_raw.npy").relative_to(root_dir)),
+                "final_step_block_token_mean_content_raw": str(
+                    (stage_dir / "final_step_block_token_mean_content_raw.npy").relative_to(root_dir)
+                ),
+                "step_token_mean_content_renorm": str(
+                    (stage_dir / "step_token_mean_content_renorm.npy").relative_to(root_dir)
+                ),
+                "final_step_block_token_mean_content_renorm": str(
+                    (stage_dir / "final_step_block_token_mean_content_renorm.npy").relative_to(root_dir)
+                ),
                 "selected_maps": selected_map_meta,
                 **subword_overview_paths,
+                **subword_renorm_overview_paths,
                 **overview_paths,
+                **overview_renorm_paths,
             }
 
         save_json(root_dir / "trace_manifest.json", manifest)
 
-    def _normalized_step_block_token_mean(self, state: dict) -> np.ndarray:
+    def _normalized_step_block_token_mean(self, state: dict, renorm_content: bool = False) -> np.ndarray:
+        """用 query 数量对累计注意力求平均，得到可比较的 step/block 统计。"""
         counts = state["step_block_query_count"].astype(np.float64)
         counts = np.maximum(counts[..., None], 1.0)
-        return state["step_block_token_sum"] / counts
+        source = (
+            state["step_block_token_sum_content_renorm"]
+            if renorm_content
+            else state["step_block_token_sum"]
+        )
+        return source / counts
 
     def _export_focus_views(
         self,
@@ -1118,9 +1415,14 @@ class CrossAttentionTracer:
         token_labels: List[str],
         focus_token_indices: List[int],
     ) -> None:
+        """为重点 token 导出分步、分块以及 top 空间位置的细粒度视图。"""
         if not focus_token_indices:
             return
 
+        content_token_labels = [
+            token_labels[token_idx]
+            for token_idx in self.content_token_indices
+        ]
         last_step = state["total_steps"] - 1
         last_block = state["num_blocks"] - 1
         selected_steps = state["selected_steps"]
@@ -1177,6 +1479,8 @@ class CrossAttentionTracer:
             for rank, query_idx in enumerate(top_indices, start=1):
                 coord = final_map["coords"][query_idx].tolist()
                 text_dist = final_map["attn_map"][query_idx, :].astype(np.float32)
+                content_text_dist_raw = slice_token_values(text_dist, self.content_token_indices)
+                content_text_dist_renorm = renormalize_token_values(content_text_dist_raw)
                 save_bar(
                     text_dist,
                     token_labels,
@@ -1186,6 +1490,24 @@ class CrossAttentionTracer:
                         f"(focus token '{token_label}', attn={focus_scores[query_idx]:.4f})"
                     ),
                 )
+                save_bar(
+                    content_text_dist_raw,
+                    content_token_labels,
+                    focus_dir / f"top_spatial_rank_{rank:02d}_text_distribution_content_raw.png",
+                    title=(
+                        f"{stage_dir.name}: spatial token #{rank} at {coord} "
+                        f"(drop special only, focus token '{token_label}')"
+                    ),
+                )
+                save_bar(
+                    content_text_dist_renorm,
+                    content_token_labels,
+                    focus_dir / f"top_spatial_rank_{rank:02d}_text_distribution_content_renorm.png",
+                    title=(
+                        f"{stage_dir.name}: spatial token #{rank} at {coord} "
+                        f"(content renorm, focus token '{token_label}')"
+                    ),
+                )
                 top_items.append(
                     {
                         "rank": rank,
@@ -1193,6 +1515,12 @@ class CrossAttentionTracer:
                         "coord": coord,
                         "focus_token_attention": float(focus_scores[query_idx]),
                         "bar_path": f"{token_slug}/top_spatial_rank_{rank:02d}_text_distribution.png",
+                        "bar_path_content_raw": (
+                            f"{token_slug}/top_spatial_rank_{rank:02d}_text_distribution_content_raw.png"
+                        ),
+                        "bar_path_content_renorm": (
+                            f"{token_slug}/top_spatial_rank_{rank:02d}_text_distribution_content_renorm.png"
+                        ),
                     }
                 )
 
@@ -1214,16 +1542,19 @@ class CrossAttentionTracer:
         word_labels: List[str],
         word_token_indices: List[List[int]],
         focus_word_indices: List[int],
+        renorm_content: bool,
     ) -> dict:
+        """以单词分组为单位导出总览图和元数据。"""
         return self._export_group_overview(
             stage_dir=stage_dir,
             state=state,
             group_labels=word_labels,
             group_token_indices=word_token_indices,
             focus_group_indices=focus_word_indices,
-            file_prefix="word_attention",
+            file_prefix=f"word_attention_{'content_renorm' if renorm_content else 'content_raw'}",
             title_label="word-to-3D",
             aggregation_name="word",
+            renorm_content=renorm_content,
         )
 
     def _export_group_overview(
@@ -1236,13 +1567,16 @@ class CrossAttentionTracer:
         file_prefix: str,
         title_label: str,
         aggregation_name: str,
+        renorm_content: bool,
     ) -> dict:
+        """复用同一套逻辑导出 subword / word 两类分组总览结果。"""
         if not group_labels or not group_token_indices:
             return {}
-        if state["overview_sum_map"] is None or state["overview_count"] <= 0 or state["overview_coords"] is None:
+        overview_sum_key = "overview_sum_map_content_renorm" if renorm_content else "overview_sum_map"
+        if state[overview_sum_key] is None or state["overview_count"] <= 0 or state["overview_coords"] is None:
             return {}
 
-        avg_map = state["overview_sum_map"] / float(max(state["overview_count"], 1))
+        avg_map = state[overview_sum_key] / float(max(state["overview_count"], 1))
         avg_group_maps = aggregate_token_values_by_groups(avg_map, group_token_indices, reduce="mean")
 
         step_panels = []
@@ -1250,13 +1584,20 @@ class CrossAttentionTracer:
             item = state["selected_maps"].get((step_index, state["overview_block_index"]))
             if item is None:
                 continue
+            item_attn_map = item["attn_map"][:, : self.valid_token_count]
+            if renorm_content:
+                item_attn_map_content = slice_token_values(item_attn_map, self.content_token_indices)
+                item_attn_map_content_renorm = renormalize_token_values(item_attn_map_content)
+                item_attn_map = np.zeros_like(item_attn_map, dtype=np.float32)
+                if self.content_token_indices:
+                    item_attn_map[:, self.content_token_indices] = item_attn_map_content_renorm
             step_panels.append(
                 {
                     "step_index": int(step_index),
                     "timestep": float(item["timestep"]),
                     "coords": item["coords"],
                     "word_maps": aggregate_token_values_by_groups(
-                        item["attn_map"][:, : self.token_meta["valid_token_count"]],
+                        item_attn_map,
                         group_token_indices,
                         reduce="mean",
                     ),
@@ -1274,7 +1615,10 @@ class CrossAttentionTracer:
             focus_word_indices=focus_group_indices,
             step_panels=step_panels,
             path=overview_image,
-            title=f"{stage_dir.name}: {title_label} cross-attention overview",
+            title=(
+                f"{stage_dir.name}: {title_label} cross-attention overview "
+                f"({'content renorm' if renorm_content else 'content raw'})"
+            ),
             block_index=state["overview_block_index"],
         )
 
@@ -1293,6 +1637,7 @@ class CrossAttentionTracer:
                 "overview_count": int(state["overview_count"]),
                 "labels": group_labels,
                 "token_index_groups": group_token_indices,
+                "attention_mode": "content_renorm" if renorm_content else "content_raw",
                 "focus_indices": focus_group_indices,
                 "focus_labels": [group_labels[i] for i in focus_group_indices],
                 "selected_step_indices": [panel["step_index"] for panel in step_panels],
@@ -1307,8 +1652,20 @@ class CrossAttentionTracer:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """构建命令行参数解析器，并在 --help 中展示常用运行示例。"""
     parser = argparse.ArgumentParser(
-        description="Trace text-to-space cross-attention in TRELLIS without modifying the original codebase."
+        description="Trace text-to-space cross-attention in TRELLIS without modifying the original codebase.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  python example_text_cross_attention.py --prompt \"a red chair\"\n"
+            "  python example_text_cross_attention.py --prompt \"a red chair\" --focus-words chair,red\n"
+            "  python example_text_cross_attention.py --prompt \"a wooden table\" "
+            "--trace-stages slat --slat-steps 16\n"
+            "\n"
+            "Outputs will be written to:\n"
+            "  output/<case_name>/cross_attention_trace/\n"
+        ),
     )
     parser.add_argument("--prompt", required=True, help="Text prompt for TRELLIS text-to-3D.")
     parser.add_argument(
@@ -1360,11 +1717,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def make_case_name(prompt: str) -> str:
+    """根据 prompt 生成默认输出目录名。"""
     trimmed = sanitize_name(prompt, max_len=64)
     return trimmed or "cross_attention_trace"
 
 
 def main() -> None:
+    """运行完整的 cross-attention tracing 流程并导出结果。"""
     parser = build_parser()
     args = parser.parse_args()
 
@@ -1476,19 +1835,25 @@ def main() -> None:
         f.write("  sparse_structure_coords.npy          sparse structure coordinates\n")
         f.write("  slat_coords.npy                      final SLat coordinates\n")
         f.write("  slat_feats.npy                       final SLat features\n")
-        f.write("  <stage>/step_token_heatmap.png       token importance over sampling steps\n")
-        f.write("  <stage>/final_step_block_token_heatmap.png  token importance over transformer blocks\n")
-        f.write("  <stage>/focus_token_step_curves.png  focus-token curves over steps\n")
-        f.write("  <stage>/subword_attention_overview.png  paper-style BPE/subword-to-3D attention overview\n")
-        f.write("  <stage>/subword_attention_average_maps.npz  averaged subword-level spatial attention maps\n")
-        f.write("  <stage>/subword_attention_overview.json  subword-level overview metadata\n")
-        f.write("  <stage>/word_attention_overview.png  paper-style word-to-3D attention overview\n")
-        f.write("  <stage>/word_attention_average_maps.npz  averaged word-level spatial attention maps\n")
-        f.write("  <stage>/word_attention_overview.json word-level overview metadata\n")
+        f.write("  <stage>/step_token_mean_content_raw.npy      content-token means after dropping special tokens only\n")
+        f.write("  <stage>/step_token_mean_content_renorm.npy   content-token means after dropping special tokens and renormalizing\n")
+        f.write("  <stage>/final_step_block_token_mean_content_raw.npy  final-step block means, drop special tokens only\n")
+        f.write("  <stage>/final_step_block_token_mean_content_renorm.npy  final-step block means, content renorm\n")
+        f.write("  <stage>/step_token_heatmap.png       token importance over sampling steps (all valid tokens)\n")
+        f.write("  <stage>/final_step_block_token_heatmap.png  token importance over transformer blocks (all valid tokens)\n")
+        f.write("  <stage>/step_token_heatmap_content_raw.png   content-token heatmap after dropping special tokens only\n")
+        f.write("  <stage>/step_token_heatmap_content_renorm.png  content-token heatmap after dropping special tokens and renormalizing\n")
+        f.write("  <stage>/focus_token_step_curves.png  focus-token curves over steps (all valid tokens)\n")
+        f.write("  <stage>/focus_token_step_curves_content_raw.png  focus-token curves with special tokens removed only\n")
+        f.write("  <stage>/focus_token_step_curves_content_renorm.png  focus-token curves with content-token renormalization\n")
+        f.write("  <stage>/subword_attention_content_raw_overview.png  subword-to-3D overview, drop special tokens only\n")
+        f.write("  <stage>/subword_attention_content_renorm_overview.png  subword-to-3D overview, renorm after dropping special tokens\n")
+        f.write("  <stage>/word_attention_content_raw_overview.png  word-to-3D overview, drop special tokens only\n")
+        f.write("  <stage>/word_attention_content_renorm_overview.png  word-to-3D overview, renorm after dropping special tokens\n")
         f.write("  <stage>/token_*/step_progress.png    spatial attention for one text token across steps\n")
         f.write("  <stage>/token_*/block_progress.png   spatial attention for one text token across blocks\n")
-        f.write("  <stage>/token_*/top_spatial_tokens.json      top spatial tokens in the final map\n")
-        f.write("  <stage>/raw_maps/*.npz               raw attention maps for selected step/block pairs\n")
+        f.write("  <stage>/token_*/top_spatial_tokens.json      top spatial tokens in the final map, with extra raw/renorm bar paths\n")
+        f.write("  <stage>/raw_maps/*.npz               raw maps plus content_raw/content_renorm attention arrays\n")
 
     print(f"[DONE] Trace saved to: {root_dir}")
 

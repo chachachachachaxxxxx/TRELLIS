@@ -11,6 +11,12 @@ It also traces one representative dense transformer block from the sparse
 structure model and one representative sparse transformer block from the SLat
 model. Repeated modules are therefore shown with one concrete example instead
 of dumping every repeated block.
+
+追踪并可视化 microsoft/TRELLIS-text-xlarge 的生成内部机制。
+此脚本将文本到 3D 的流水线扩展为明确的阶段，并在可能的情况下以两种形式保存中间变量：
+用于精确检查 / 复用的原始工件
+人类可读的可视化内容
+它还会从稀疏结构模型中追踪一个有代表性的密集 Transformer 块，并从 SLat 模型中追踪一个有代表性的稀疏 Transformer 块。因此，对于重复的模块，会展示一个具体示例，而非输出每个重复的块。
 """
 
 from __future__ import annotations
