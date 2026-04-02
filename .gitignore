@@ -400,3 +400,5 @@ FodyWeavers.xsd
 output
 downloads
 outputs
+*.glb
+assets

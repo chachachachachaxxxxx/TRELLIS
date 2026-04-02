@@ -14,7 +14,8 @@ pipeline.cuda()
 
 # Run the pipeline
 outputs = pipeline.run(
-    "A circular green plate with approximately 10-12 red strawberries and a swirl of white whipped cream decorated with small golden spherical sprinkles.",
+    "A circular green plate with approximately 10-12 blue blueberries and a swirl of white whipped cream decorated with small golden spherical sprinkles.",
+        # "A circular green plate with approximately 10-12 red strawberries and a swirl of white whipped cream decorated with small golden spherical sprinkles.",
     seed=1,
     # Optional parameters
     # sparse_structure_sampler_params={
@@ -34,7 +35,7 @@ outputs = pipeline.run(
 if not os.path.exists("output"):
     os.makedirs("output")
 
-dir = "sample"
+dir = "blue_blueberries"
 if not os.path.exists("output/" + dir):
     os.makedirs("output/" + dir)
 

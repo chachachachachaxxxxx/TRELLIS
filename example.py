@@ -14,7 +14,7 @@ pipeline = TrellisImageTo3DPipeline.from_pretrained("microsoft/TRELLIS-image-lar
 pipeline.cuda()
 
 # Load an image
-image = Image.open("assets/example_image/T.png")
+image = Image.open("assets/3D_Dollhouse_Happy_Brother_p1.png")
 
 # Run the pipeline
 outputs = pipeline.run(
