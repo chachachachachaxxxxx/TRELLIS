@@ -52,6 +52,7 @@ import trimesh
 from PIL import Image, ImageFilter
 from tqdm import tqdm
 
+from output_layout import build_output_layout
 import example_image_prompt_to_prompt as image_p2p
 
 
@@ -69,6 +70,8 @@ SOURCE_RENDER_CANDIDATES = (
     "source.png",
     "input.png",
 )
+
+EDIT_METHOD_NAME = "image_prompt_to_prompt_rf_inversion"
 
 
 def ensure_path_exists(path: Path, label: str) -> Path:
@@ -798,16 +801,19 @@ def main() -> int:
             case_name = image_p2p.slugify(output_path.stem)
         else:
             case_name = image_p2p.slugify(f"{asset_dir.name}_to_{edit_image_path.stem}")
-    if output_path is not None:
-        out_dir = image_p2p.ensure_dir(output_path.parent / f"{output_path.stem}_rf_inversion")
-    else:
-        out_dir = image_p2p.ensure_dir(Path("output") / case_name / "image_prompt_to_prompt_rf_inversion")
+    output_layout = build_output_layout(EDIT_METHOD_NAME, case_name)
+    out_dir = image_p2p.ensure_dir(output_layout.edit_dir)
 
     image_p2p.save_json(
         out_dir / "config.json",
         {
+            "method_name": EDIT_METHOD_NAME,
+            "case_name": case_name,
             "model": args.model,
             "attn_backend": backend,
+            "output_root_dir": str(output_layout.root_dir),
+            "output_case_dir": str(output_layout.case_dir),
+            "output_edit_dir": str(out_dir),
             "source_model": str(asset_dir),
             "input_model": args.input_model or None,
             "mask_glb": args.mask_glb or None,

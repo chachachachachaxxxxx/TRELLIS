@@ -49,27 +49,29 @@ python xxx.py --help
 
 ## 一览表
 
+- 默认示例导出现在统一按 `outputs/<method_name>/<case_name>/...` 组织；部分脚本仍保留 `--output-dir` 作为显式覆盖。
+
 | 脚本 | 类型 | 主要用途 | 输入方式 | 主要输出 |
 | --- | --- | --- | --- | --- |
-| `example.py` | 基础推理 | 单张图片转 3D | 脚本内写死图片路径 | `output/sample_*.mp4`、`output/sample.glb`、`output/sample.ply` |
-| `example_text.py` | 基础推理 | 文本转 3D | 脚本内写死 prompt | `output/<dir>/sample_*` |
-| `example_multi_image.py` | 基础推理 | 多图条件生成 | 脚本内写死图片列表 | `sample_multi.mp4` |
-| `example_variant.py` | 基础推理 | 从已有 mesh 生成变体 | 脚本内写死 mesh + prompt | `sample_variant.mp4` |
-| `example_annotated.py` | 教学脚本 | 手动拆解整条 image-to-3D 流程 | 脚本内写死图片路径 | 当前目录下 `sample_*` |
-| `example_visualize_stages.py` | 可视化/调试 | 导出每个阶段的中间结果 | 命令行位置参数 | `output/<case_name>/...` |
-| `example_flux_krea_to_3d.py` | 串联推理 | 先文生图，再图生 3D | 命令行参数 | `output/flux_krea_to_3d/...` |
-| `example_text_cross_attention.py` | 分析脚本 | 追踪文本 token 的 cross-attention | 命令行参数 | `output/<case>/cross_attention_trace/` |
-| `example_image_cross_attention.py` | 分析脚本 | 追踪图像 patch 的 cross-attention | 命令行参数 | `output/<case>/image_cross_attention_trace/` |
-| `example_text_prompt_to_prompt.py` | 编辑脚本 | 文本 Prompt-to-Prompt 3D 编辑 | 命令行参数 | `output/<case>/prompt_to_prompt_edit/` |
-| `example_image_prompt_to_prompt.py` | 编辑脚本 | 基于 source/edit/mask 的图像局部编辑 | 命令行参数 | `output/<case>/image_prompt_to_prompt_edit/` |
-| `example_image_prompt_to_prompt_rf_inversion.py` | 编辑脚本 | 基于已有 3D 资产 + 图像编辑的稳态编辑 | 命令行参数 | `output/<case>/image_prompt_to_prompt_rf_inversion/` |
+| `example.py` | 基础推理 | 单张图片转 3D | 脚本内写死图片路径 | `outputs/image_to_3d/<case>/...` |
+| `example_text.py` | 基础推理 | 文本转 3D | 脚本内写死 prompt | `outputs/text_to_3d/<case>/...` |
+| `example_multi_image.py` | 基础推理 | 多图条件生成 | 脚本内写死图片列表 | `outputs/multi_image_to_3d/<case>/...` |
+| `example_variant.py` | 基础推理 | 从已有 mesh 生成变体 | 脚本内写死 mesh + prompt | `outputs/variant_to_3d/<case>/...` |
+| `example_annotated.py` | 教学脚本 | 手动拆解整条 image-to-3D 流程 | 脚本内写死图片路径 | `outputs/annotated_image_to_3d/<case>/...` |
+| `example_visualize_stages.py` | 可视化/调试 | 导出每个阶段的中间结果 | 命令行位置参数 | `outputs/visualize_stages/<case_name>/...` |
+| `example_flux_krea_to_3d.py` | 串联推理 | 先文生图，再图生 3D | 命令行参数 | `outputs/flux_krea_to_3d/<case>/...` |
+| `example_text_cross_attention.py` | 分析脚本 | 追踪文本 token 的 cross-attention | 命令行参数 | `outputs/text_cross_attention/<case>/...` |
+| `example_image_cross_attention.py` | 分析脚本 | 追踪图像 patch 的 cross-attention | 命令行参数 | `outputs/image_cross_attention/<case>/...` |
+| `example_text_prompt_to_prompt.py` | 编辑脚本 | 文本 Prompt-to-Prompt 3D 编辑 | 命令行参数 | `outputs/text_prompt_to_prompt/<case>/...` |
+| `example_image_prompt_to_prompt.py` | 编辑脚本 | 基于 source/edit/mask 的图像局部编辑 | 命令行参数 | `outputs/image_prompt_to_prompt/<case>/...` |
+| `example_image_prompt_to_prompt_rf_inversion.py` | 编辑脚本 | 基于已有 3D 资产 + 图像编辑的稳态编辑 | 命令行参数 | `outputs/image_prompt_to_prompt_rf_inversion/<case>/...` |
 
 ## 1. 基础生成脚本
 
 ### `example.py`
 
 - 用途：最小的 image-to-3D 示例，最适合确认环境和模型能不能正常跑通。
-- 默认输入：`assets/example_image/T.png`
+- 默认输入：`assets/3D_Dollhouse_Happy_Brother_p1.png`
 - 最小运行：
 
 ```bash
@@ -77,11 +79,11 @@ python example.py
 ```
 
 - 输出：
-  - `output/sample_gs.mp4`
-  - `output/sample_rf.mp4`
-  - `output/sample_mesh.mp4`
-  - `output/sample.glb`
-  - `output/sample.ply`
+  - `outputs/image_to_3d/3d_dollhouse_happy_brother_p1/sample_gs.mp4`
+  - `outputs/image_to_3d/3d_dollhouse_happy_brother_p1/sample_rf.mp4`
+  - `outputs/image_to_3d/3d_dollhouse_happy_brother_p1/sample_mesh.mp4`
+  - `outputs/image_to_3d/3d_dollhouse_happy_brother_p1/sample.glb`
+  - `outputs/image_to_3d/3d_dollhouse_happy_brother_p1/sample.ply`
 - 适合什么时候用：
   - 第一次验证安装是否成功
   - 想看最小调用范式：`from_pretrained -> run -> render/export`
@@ -101,13 +103,13 @@ python example_text.py
 
 - 当前脚本里 prompt 是写死的，输出目录名也是写死的：
   - prompt 在 `pipeline.run(...)` 的第一个参数
-  - 目录名在 `dir = "blue_blueberries"`
+  - 样例名在 `sample_name = "blue_blueberries"`
 - 输出：
-  - `output/blue_blueberries/sample_gs.mp4`
-  - `output/blue_blueberries/sample_rf.mp4`
-  - `output/blue_blueberries/sample_mesh.mp4`
-  - `output/blue_blueberries/sample.glb`
-  - `output/blue_blueberries/sample.ply`
+  - `outputs/text_to_3d/blue_blueberries/sample_gs.mp4`
+  - `outputs/text_to_3d/blue_blueberries/sample_rf.mp4`
+  - `outputs/text_to_3d/blue_blueberries/sample_mesh.mp4`
+  - `outputs/text_to_3d/blue_blueberries/sample.glb`
+  - `outputs/text_to_3d/blue_blueberries/sample.ply`
 - 适合什么时候用：
   - 想看 TRELLIS 文本模型的最小调用方式
   - 想快速试验少量 prompt
@@ -128,7 +130,7 @@ python example_multi_image.py
 ```
 
 - 输出：
-  - 当前目录下 `sample_multi.mp4`
+  - `outputs/multi_image_to_3d/character_triplet/sample_multi.mp4`
 - 适合什么时候用：
   - 单张图视角信息不够时
   - 多张输入图已经是同一个物体的不同视角/不同参考图
@@ -149,7 +151,7 @@ python example_variant.py
 ```
 
 - 输出：
-  - 当前目录下 `sample_variant.mp4`
+  - `outputs/variant_to_3d/t_variant/sample_variant.mp4`
 - 适合什么时候用：
   - 你已经有一个基础几何
   - 想保留结构，改材质、表面观感、风格
@@ -170,11 +172,11 @@ python example_annotated.py
 ```
 
 - 输出：
-  - 当前目录下 `sample_gs.mp4`
-  - 当前目录下 `sample_rf.mp4`
-  - 当前目录下 `sample_mesh.mp4`
-  - 当前目录下 `sample.glb`
-  - 当前目录下 `sample.ply`
+  - `outputs/annotated_image_to_3d/t/sample_gs.mp4`
+  - `outputs/annotated_image_to_3d/t/sample_rf.mp4`
+  - `outputs/annotated_image_to_3d/t/sample_mesh.mp4`
+  - `outputs/annotated_image_to_3d/t/sample.glb`
+  - `outputs/annotated_image_to_3d/t/sample.ply`
 - 适合什么时候用：
   - 想学习 TRELLIS 推理流程
   - 想自己改 pipeline，而不是只会调 `pipeline.run(...)`
@@ -203,7 +205,7 @@ python example_visualize_stages.py assets/example_image/2d_edit.png demo_case 1
   - 第 3 个位置参数：`seed`
 - 默认输入：`assets/example_image/2d_edit.png`
 - 输出目录：
-  - `output/<case_name>/`
+  - `outputs/visualize_stages/<case_name>/`
 - 典型输出：
   - `1_output_preprocessed_518x518.png`
   - `2_output_cond_features_pca.png`
@@ -236,11 +238,11 @@ python example_flux_krea_to_3d.py "a plate of strawberries with whipped cream"
 ```bash
 python example_flux_krea_to_3d.py \
   "a plate of strawberries with whipped cream" \
-  --output-dir output/flux_krea_to_3d/strawberries
+  --output-dir outputs/flux_krea_to_3d/strawberries
 ```
 
 - 输出目录默认是：
-  - `output/flux_krea_to_3d/strawberries/`
+  - `outputs/flux_krea_to_3d/strawberries/`
 - 主要输出：
   - `reference.png`
   - `reference_preprocessed.png`
@@ -282,7 +284,7 @@ python example_text_cross_attention.py \
 ```
 
 - 输出目录：
-  - `output/<case_name>/cross_attention_trace/`
+  - `outputs/text_cross_attention/<case_name>/`
 - 主要输出：
   - `prompt_tokens.json`
   - `trace_manifest.json`
@@ -320,7 +322,7 @@ python example_image_cross_attention.py \
 ```
 
 - 输出目录：
-  - `output/<case_name>/image_cross_attention_trace/`
+  - `outputs/image_cross_attention/<case_name>/`
 - 主要输出：
   - `case_manifest.json`
   - `crop_context.json`
@@ -345,6 +347,8 @@ python -m http.server 8000
 
 ## 5. Prompt-to-Prompt 编辑脚本
 
+- 这几种编辑脚本现在统一按 `outputs/<method_name>/<case_name>/...` 组织输出，方便不同编辑方法并排对比。
+
 ### `example_text_prompt_to_prompt.py`
 
 - 用途：对文本 prompt 做 Prompt-to-Prompt 编辑，在不改 TRELLIS 核心源码的前提下，通过运行时 patch cross-attention 实现结构保留式编辑。
@@ -358,8 +362,8 @@ python example_text_prompt_to_prompt.py \
 ```
 
 - 输出目录：
-  - 编辑结果：`output/<case_name>/prompt_to_prompt_edit/`
-  - 如果不加 `--skip-source`，还会有：`output/<case_name>/source_original/`
+  - 编辑结果：`outputs/text_prompt_to_prompt/<case_name>/edit/`
+  - 如果不加 `--skip-source`，还会有：`outputs/text_prompt_to_prompt/<case_name>/source_original/`
 - 主要输出：
   - `config.json`
   - `source_tokens.json`
@@ -399,8 +403,8 @@ python example_image_prompt_to_prompt.py \
 ```
 
 - 输出目录：
-  - 编辑结果：`output/<case_name>/image_prompt_to_prompt_edit/`
-  - 如果不加 `--skip-source`，还会有：`output/<case_name>/source_original/`
+  - 编辑结果：`outputs/image_prompt_to_prompt/<case_name>/edit/`
+  - 如果不加 `--skip-source`，还会有：`outputs/image_prompt_to_prompt/<case_name>/source_original/`
 - 主要输出：
   - `config.json`
   - `input_preprocess.json`
@@ -461,8 +465,9 @@ python example_image_prompt_to_prompt_rf_inversion.py \
 ```
 
 - 输出目录规则：
+  - 不传 `--output_path` 时，默认工作目录是 `outputs/image_prompt_to_prompt_rf_inversion/<case_name>/edit/`
   - 如果给了 `--output_path /a/b/result.glb`
-  - 实际工作目录会是 `/a/b/result_rf_inversion/`
+  - 实际工作目录会是 `outputs/image_prompt_to_prompt_rf_inversion/result/edit/`
   - 并且最终 `sample_00.glb` 会复制一份到 `/a/b/result.glb`
 - 主要输出：
   - `config.json`

@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("output/flux_krea_to_3d/strawberries"),
+        default=Path("outputs/flux_krea_to_3d/strawberries"),
         help="Directory to save the reference image and 3D outputs.",
     )
     parser.add_argument("--flux-model", type=str, default=DEFAULT_FLUX_MODEL)

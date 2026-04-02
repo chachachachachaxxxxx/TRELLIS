@@ -124,6 +124,7 @@ os.environ['SPCONV_ALGO'] = 'native'        # Can be 'native' or 'auto', default
                                             # Recommended to set to 'native' if run only once.
 
 import imageio
+from pathlib import Path
 from PIL import Image
 from trellis.pipelines import TrellisImageTo3DPipeline
 from trellis.utils import render_utils, postprocessing_utils
@@ -154,13 +155,16 @@ outputs = pipeline.run(
 # - outputs['radiance_field']: a list of radiance fields
 # - outputs['mesh']: a list of meshes
 
+output_dir = Path("outputs/image_to_3d/example_image")
+output_dir.mkdir(parents=True, exist_ok=True)
+
 # Render the outputs
 video = render_utils.render_video(outputs['gaussian'][0])['color']
-imageio.mimsave("sample_gs.mp4", video, fps=30)
+imageio.mimsave(output_dir / "sample_gs.mp4", video, fps=30)
 video = render_utils.render_video(outputs['radiance_field'][0])['color']
-imageio.mimsave("sample_rf.mp4", video, fps=30)
+imageio.mimsave(output_dir / "sample_rf.mp4", video, fps=30)
 video = render_utils.render_video(outputs['mesh'][0])['normal']
-imageio.mimsave("sample_mesh.mp4", video, fps=30)
+imageio.mimsave(output_dir / "sample_mesh.mp4", video, fps=30)
 
 # GLB files can be extracted from the outputs
 glb = postprocessing_utils.to_glb(
@@ -170,18 +174,18 @@ glb = postprocessing_utils.to_glb(
     simplify=0.95,          # Ratio of triangles to remove in the simplification process
     texture_size=1024,      # Size of the texture used for the GLB
 )
-glb.export("sample.glb")
+glb.export(output_dir / "sample.glb")
 
 # Save Gaussians as PLY files
-outputs['gaussian'][0].save_ply("sample.ply")
+outputs['gaussian'][0].save_ply(output_dir / "sample.ply")
 ```
 
 After running the code, you will get the following files:
-- `sample_gs.mp4`: a video showing the 3D Gaussian representation
-- `sample_rf.mp4`: a video showing the Radiance Field representation
-- `sample_mesh.mp4`: a video showing the mesh representation
-- `sample.glb`: a GLB file containing the extracted textured mesh
-- `sample.ply`: a PLY file containing the 3D Gaussian representation
+- `outputs/image_to_3d/example_image/sample_gs.mp4`: a video showing the 3D Gaussian representation
+- `outputs/image_to_3d/example_image/sample_rf.mp4`: a video showing the Radiance Field representation
+- `outputs/image_to_3d/example_image/sample_mesh.mp4`: a video showing the mesh representation
+- `outputs/image_to_3d/example_image/sample.glb`: a GLB file containing the extracted textured mesh
+- `outputs/image_to_3d/example_image/sample.ply`: a PLY file containing the 3D Gaussian representation
 
 
 ### Web Demo
@@ -346,4 +350,3 @@ If you find this work helpful, please consider citing our paper:
     year    = {2024}
 }
 ```
-

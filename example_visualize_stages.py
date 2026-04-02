@@ -1,7 +1,7 @@
 """
 TRELLIS 全流程中间结果可视化脚本
 
-在 output/<case_name>/ 下保存每个阶段的输入和输出。
+在 outputs/visualize_stages/<case_name>/ 下保存每个阶段的输入和输出。
 命名规则: <阶段号>_<input/output>_<描述>.<格式>
 """
 
@@ -22,6 +22,7 @@ from mpl_toolkits.mplot3d import Axes3D
 
 from trellis.pipelines import TrellisImageTo3DPipeline
 from trellis.utils import render_utils, postprocessing_utils
+from output_layout import build_output_layout
 
 
 def save_tensor_stats(tensor, path, title="Tensor Statistics"):
@@ -177,7 +178,7 @@ def render_snapshot_image(sample, path):
 def run_visualization(image_path: str, case_name: str, seed: int = 1):
     """运行完整 pipeline 并保存每个阶段的输入输出可视化"""
 
-    out_dir = os.path.join("output", case_name)
+    out_dir = str(build_output_layout("visualize_stages", case_name).case_dir)
     os.makedirs(out_dir, exist_ok=True)
     print(f"[INFO] 输出目录: {out_dir}")
 

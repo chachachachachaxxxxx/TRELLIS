@@ -45,6 +45,7 @@ TRELLIS 的核心思想是 Structured LATent (SLAT) —— 结构化潜在表示
 """
 
 import os
+from pathlib import Path
 os.environ['SPCONV_ALGO'] = 'native'
 
 import imageio
@@ -54,6 +55,7 @@ import numpy as np
 from PIL import Image
 from trellis.pipelines import TrellisImageTo3DPipeline
 from trellis.utils import render_utils, postprocessing_utils
+from output_layout import build_output_layout
 
 
 # ============================================================================
@@ -82,7 +84,10 @@ from trellis.utils import render_utils, postprocessing_utils
 pipeline = TrellisImageTo3DPipeline.from_pretrained("microsoft/TRELLIS-image-large")
 pipeline.cuda()
 
-image = Image.open("assets/example_image/T.png")
+image_path = Path("assets/example_image/T.png")
+image = Image.open(image_path)
+output_dir = build_output_layout("annotated_image_to_3d", image_path.stem.lower()).case_dir
+output_dir.mkdir(parents=True, exist_ok=True)
 
 
 # ============================================================================
@@ -441,13 +446,13 @@ print(f"网格顶点数: {mesh.vertices.shape[0]}, 面片数: {mesh.faces.shape[
 
 # ── 6a: 渲染视频 ─────────────────────────────────────────────────────────
 video = render_utils.render_video(gaussian)['color']
-imageio.mimsave("sample_gs.mp4", video, fps=30)
+imageio.mimsave(output_dir / "sample_gs.mp4", video, fps=30)
 
 video = render_utils.render_video(radiance_field)['color']
-imageio.mimsave("sample_rf.mp4", video, fps=30)
+imageio.mimsave(output_dir / "sample_rf.mp4", video, fps=30)
 
 video = render_utils.render_video(mesh)['normal']
-imageio.mimsave("sample_mesh.mp4", video, fps=30)
+imageio.mimsave(output_dir / "sample_mesh.mp4", video, fps=30)
 
 # ── 6b: 导出 GLB (textured mesh) ─────────────────────────────────────────
 #
@@ -465,12 +470,13 @@ glb = postprocessing_utils.to_glb(
     simplify=0.95,
     texture_size=1024,
 )
-glb.export("sample.glb")
+glb.export(output_dir / "sample.glb")
 
 # ── 6c: 导出 PLY (3D Gaussians) ──────────────────────────────────────────
-gaussian.save_ply("sample.ply")
+gaussian.save_ply(output_dir / "sample.ply")
 
 print("全流程完成！生成文件:")
+print(f"输出目录: {output_dir}")
 print("  - sample_gs.mp4:   3D Gaussian 渲染视频")
 print("  - sample_rf.mp4:   辐射场渲染视频")
 print("  - sample_mesh.mp4: 网格法线渲染视频")

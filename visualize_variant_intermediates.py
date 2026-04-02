@@ -15,6 +15,7 @@ from PIL import Image
 from trellis.modules import sparse as sp
 from trellis.pipelines import TrellisTextTo3DPipeline
 from trellis.utils import postprocessing_utils, render_utils
+from output_layout import build_output_layout, sanitize_output_name
 
 
 os.environ.setdefault("SPCONV_ALGO", "native")
@@ -41,8 +42,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir",
-        default="outputs/variant_intermediates",
-        help="Directory to store all exported intermediates.",
+        default="",
+        help="Optional explicit output directory. Defaults to outputs/variant_intermediates/<case-name>/",
+    )
+    parser.add_argument(
+        "--case-name",
+        default="",
+        help="Optional case name used when --output-dir is not provided.",
     )
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--num-samples", type=int, default=1)
@@ -325,7 +331,15 @@ def save_decoded_outputs(
 
 def main() -> None:
     args = parse_args()
-    output_dir = Path(args.output_dir)
+    case_name = args.case_name.strip() or sanitize_output_name(
+        f"{Path(args.mesh).stem}_{args.prompt}",
+        max_len=96,
+        fallback="variant_intermediates",
+    )
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+    else:
+        output_dir = build_output_layout("variant_intermediates", case_name).case_dir
     ensure_dir(output_dir)
 
     slat_sampler_params = {}
@@ -338,6 +352,9 @@ def main() -> None:
     pipeline.cuda()
 
     meta = {
+        "method_name": "variant_intermediates",
+        "case_name": case_name,
+        "output_dir": str(output_dir),
         "model": args.model,
         "mesh": args.mesh,
         "prompt": args.prompt,

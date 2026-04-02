@@ -39,6 +39,8 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from output_layout import build_output_layout
+
 
 def _peek_arg(flag: str, default: str = "") -> str:
     if flag not in sys.argv:
@@ -62,6 +64,9 @@ MultiHeadAttention = None
 SparseMultiHeadAttention = None
 SparseTensor = None
 TrellisTextTo3DPipeline = None
+
+
+EDIT_METHOD_NAME = "text_prompt_to_prompt"
 
 
 def module_available(name: str) -> bool:
@@ -754,14 +759,21 @@ def main() -> int:
     case_name = args.case_name.strip()
     if not case_name:
         case_name = slugify(f"{args.source_prompt}_to_{args.edit_prompt}")
-    out_dir = ensure_dir(Path("output") / case_name / "prompt_to_prompt_edit")
-    source_out_dir = Path("output") / case_name / "source_original"
+    output_layout = build_output_layout(EDIT_METHOD_NAME, case_name)
+    out_dir = ensure_dir(output_layout.edit_dir)
+    source_out_dir = output_layout.source_original_dir
 
     save_json(
         out_dir / "config.json",
         {
+            "method_name": EDIT_METHOD_NAME,
+            "case_name": case_name,
             "model": args.model,
             "attn_backend": backend,
+            "output_root_dir": str(output_layout.root_dir),
+            "output_case_dir": str(output_layout.case_dir),
+            "output_edit_dir": str(out_dir),
+            "output_source_dir": str(source_out_dir),
             "source_prompt": args.source_prompt,
             "edit_prompt": args.edit_prompt,
             "seed": args.seed,

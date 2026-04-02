@@ -16,7 +16,7 @@
   python example_image_cross_attention.py --images assets/example_edit/2d_render.png,assets/example_edit/2d_edit.png --mask assets/example_edit/2d_mask.png
 
 输出目录：
-  output/<case_name>/image_cross_attention_trace/
+  outputs/image_cross_attention/<case_name>/
 """
 
 import os
@@ -55,6 +55,7 @@ import torch
 from matplotlib.patches import Rectangle
 from PIL import Image
 
+from output_layout import build_output_layout
 if importlib.util.find_spec("rembg") is None:
     rembg_stub = types.ModuleType("rembg")
 
@@ -1906,7 +1907,7 @@ def main() -> None:
 
     default_case_name = sanitize_name(Path(args.input_dir).name or "image_cross_attention")
     case_name = args.case_name.strip() or default_case_name
-    root_dir = ensure_dir(Path("output") / case_name / "image_cross_attention_trace")
+    root_dir = ensure_dir(build_output_layout("image_cross_attention", case_name).case_dir)
 
     print(f"[INFO] Output directory: {root_dir}")
     print(f"[INFO] Images: {[str(path) for path in image_paths]}")
@@ -1914,7 +1915,9 @@ def main() -> None:
     print(f"[INFO] Ref:    {reference_image_path}")
 
     case_manifest = {
+        "method_name": "image_cross_attention",
         "case_name": case_name,
+        "output_dir": str(root_dir),
         "model": args.model,
         "mask_path": str(mask_path),
         "reference_image": str(reference_image_path),

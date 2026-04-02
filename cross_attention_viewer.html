@@ -420,14 +420,14 @@
         <h1>Cross-Attention Viewer</h1>
         <p>
           这个版本不再让浏览器去“选本地目录”。页面会直接读取仓库里配置好的
-          `cross_attention_trace` 结果目录，只要页面和 `output/` 在同一个站点下，就能直接浏览。
+          `outputs/text_cross_attention/...` 结果目录，只要页面和 `outputs/` 在同一个站点下，就能直接浏览。
         </p>
       </div>
       <div class="hero-note">
         <strong>使用说明</strong>
         <p>
           默认读取页面里配置好的 trace case。若想临时指定别的目录，可在 URL 后面加
-          `?trace=output/xxx/cross_attention_trace`，也可以再加 `&label=xxx` 自定义显示名称。
+          `?trace=outputs/text_cross_attention/xxx`，也可以再加 `&label=xxx` 自定义显示名称。
         </p>
       </div>
     </section>
@@ -471,7 +471,7 @@
       {
         id: "strawberry_trace",
         label: "strawberry_trace",
-        path: "output/strawberry_trace/cross_attention_trace",
+        path: "outputs/text_cross_attention/strawberry_trace",
       },
     ];
 

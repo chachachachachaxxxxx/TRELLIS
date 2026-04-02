@@ -9,7 +9,7 @@
 3. 如需额外关注某些词，可以指定：
    python example_text_cross_attention.py --prompt "a red chair" --focus-words chair,red
 4. 运行完成后，到下面目录查看导出的热力图、注意力 map 和说明文件：
-   output/<case_name>/cross_attention_trace/
+   outputs/text_cross_attention/<case_name>/
 
 常用参数：
 - --model: 选择模型路径或 Hugging Face repo。
@@ -18,7 +18,7 @@
 - --topk-focus-tokens: 自动选择并重点展示多少个 token。
 
 该脚本不会修改 TRELLIS 原始源码，而是通过运行时 monkey patch 的方式捕获注意力摘要，
-并将原始数据和可读的可视化结果保存到 output/<case_name>/cross_attention_trace/。
+并将原始数据和可读的可视化结果保存到 outputs/text_cross_attention/<case_name>/。
 """
 
 import os
@@ -54,6 +54,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+from output_layout import build_output_layout
 from trellis.modules.attention.full_attn import scaled_dot_product_attention
 from trellis.modules.attention.modules import MultiHeadAttention
 from trellis.modules.sparse.attention.full_attn import sparse_scaled_dot_product_attention
@@ -1664,7 +1665,7 @@ def build_parser() -> argparse.ArgumentParser:
             "--trace-stages slat --slat-steps 16\n"
             "\n"
             "Outputs will be written to:\n"
-            "  output/<case_name>/cross_attention_trace/\n"
+            "  outputs/text_cross_attention/<case_name>/\n"
         ),
     )
     parser.add_argument("--prompt", required=True, help="Text prompt for TRELLIS text-to-3D.")
@@ -1719,7 +1720,7 @@ def build_parser() -> argparse.ArgumentParser:
 def make_case_name(prompt: str) -> str:
     """根据 prompt 生成默认输出目录名。"""
     trimmed = sanitize_name(prompt, max_len=64)
-    return trimmed or "cross_attention_trace"
+    return trimmed or "text_cross_attention"
 
 
 def main() -> None:
@@ -1735,7 +1736,7 @@ def main() -> None:
     focus_words = [word.strip() for word in args.focus_words.split(",") if word.strip()]
     case_name = args.case_name.strip() or make_case_name(args.prompt)
 
-    root_dir = ensure_dir(Path("output") / case_name / "cross_attention_trace")
+    root_dir = ensure_dir(build_output_layout("text_cross_attention", case_name).case_dir)
     print(f"[INFO] Output directory: {root_dir}")
     print(f"[INFO] Prompt: {args.prompt}")
     print(f"[INFO] Model:  {args.model}")
@@ -1809,6 +1810,9 @@ def main() -> None:
     save_json(
         root_dir / "run_config.json",
         {
+            "method_name": "text_cross_attention",
+            "case_name": case_name,
+            "output_dir": str(root_dir),
             "prompt": args.prompt,
             "model": args.model,
             "seed": args.seed,

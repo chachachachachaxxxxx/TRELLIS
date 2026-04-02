@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 # os.environ['ATTN_BACKEND'] = 'xformers'   # Can be 'flash-attn' or 'xformers', default is 'flash-attn'
 os.environ['SPCONV_ALGO'] = 'native'        # Can be 'native' or 'auto', default is 'auto'.
                                             # 'auto' is faster but will do benchmarking at the beginning.
@@ -8,13 +9,17 @@ import imageio
 from PIL import Image
 from trellis.pipelines import TrellisImageTo3DPipeline
 from trellis.utils import render_utils, postprocessing_utils
+from output_layout import build_output_layout
 
 # Load a pipeline from a model folder or a Hugging Face model hub.
 pipeline = TrellisImageTo3DPipeline.from_pretrained("microsoft/TRELLIS-image-large")
 pipeline.cuda()
 
 # Load an image
-image = Image.open("assets/3D_Dollhouse_Happy_Brother_p1.png")
+image_path = Path("assets/3D_Dollhouse_Happy_Brother_p1.png")
+image = Image.open(image_path)
+output_dir = build_output_layout("image_to_3d", image_path.stem).case_dir
+output_dir.mkdir(parents=True, exist_ok=True)
 
 # Run the pipeline
 outputs = pipeline.run(
@@ -35,15 +40,13 @@ outputs = pipeline.run(
 # - outputs['radiance_field']: a list of radiance fields
 # - outputs['mesh']: a list of meshes
 
-if not os.path.exists("output"):
-    os.makedirs("output")
 # Render the outputs
 video = render_utils.render_video(outputs['gaussian'][0])['color']
-imageio.mimsave("output/sample_gs.mp4", video, fps=30)
+imageio.mimsave(output_dir / "sample_gs.mp4", video, fps=30)
 video = render_utils.render_video(outputs['radiance_field'][0])['color']
-imageio.mimsave("output/sample_rf.mp4", video, fps=30)
+imageio.mimsave(output_dir / "sample_rf.mp4", video, fps=30)
 video = render_utils.render_video(outputs['mesh'][0])['normal']
-imageio.mimsave("output/sample_mesh.mp4", video, fps=30)
+imageio.mimsave(output_dir / "sample_mesh.mp4", video, fps=30)
 
 # GLB files can be extracted from the outputs
 glb = postprocessing_utils.to_glb(
@@ -53,7 +56,9 @@ glb = postprocessing_utils.to_glb(
     simplify=0.95,          # Ratio of triangles to remove in the simplification process
     texture_size=1024,      # Size of the texture used for the GLB
 )
-glb.export("output/sample.glb")
+glb.export(output_dir / "sample.glb")
 
 # Save Gaussians as PLY files
-outputs['gaussian'][0].save_ply("output/sample.ply")
+outputs['gaussian'][0].save_ply(output_dir / "sample.ply")
+
+print(f"Saved outputs to: {output_dir}")
