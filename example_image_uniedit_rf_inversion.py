@@ -881,9 +881,19 @@ def main() -> int:
                 outputs=outputs,
                 out_dir=variant_dir,
                 skip_render=args.skip_render,
-                skip_glb=args.skip_glb,
+                skip_glb=True,
                 skip_ply=args.skip_ply,
             )
+            if not args.skip_glb:
+                with torch.inference_mode(False):
+                    with torch.enable_grad():
+                        image_p2p.save_outputs(
+                            outputs=outputs,
+                            out_dir=variant_dir,
+                            skip_render=True,
+                            skip_glb=False,
+                            skip_ply=True,
+                        )
 
             np.save(variant_dir / "coords_stage1.npy", coords_stage1_masked.detach().cpu().numpy())
             image_p2p.save_json(
