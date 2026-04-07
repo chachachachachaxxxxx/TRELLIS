@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 import torch
 from PIL import Image
 
-from editing.common import build_output_layout, ensure_dir, write_json
+from editing.common import build_experiment_output_layout, ensure_dir, write_json
 from editing.preprocess import prepare_aligned_inputs, save_preprocessed_inputs
 
 from .base import EditMethod, EditMethodConfig, EditMethodInputs, EditMethodOutputs
@@ -63,7 +63,7 @@ class EditMethodRunner:
             EditMethodOutputs with results
         """
         # Set up output directories
-        output_layout = build_output_layout(config.method_name, case_name)
+        output_layout = build_experiment_output_layout(config.method_name, case_name)
         out_dir = ensure_dir(output_layout.edit_dir)
         source_out_dir = output_layout.source_original_dir
 
