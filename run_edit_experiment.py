@@ -74,6 +74,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--edit-image", default="", help="Override edited target image.")
     parser.add_argument("--mask-image", default="", help="Override 2D edit mask.")
     parser.add_argument("--mask-glb", default="", help="Override 3D edit mask GLB/GLTF.")
+    parser.add_argument("--source-prompt", default="", help="Override source text prompt.")
+    parser.add_argument("--edit-prompt", default="", help="Override edit text prompt.")
     parser.add_argument(
         "--init-case",
         default="",
@@ -284,6 +286,8 @@ def main() -> int:
         edit_image=args.edit_image,
         mask_image=args.mask_image,
         mask_glb=args.mask_glb,
+        source_prompt=args.source_prompt,
+        edit_prompt=args.edit_prompt,
     )
     method.validate_case(case)
 
