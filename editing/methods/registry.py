@@ -174,7 +174,6 @@ METHODS = {
         source_assets_description="source SLAT assets",
         method_class=ImageSlatXorFusionMethod,
     ),
-    ),
 }
 
 
