@@ -118,6 +118,11 @@ try:
 except ImportError:
     ImagePromptToPromptRFInversionMethod = None
 
+try:
+    from .image_uniedit_rf_inversion import ImageUniEditRFInversionMethod
+except ImportError:
+    ImageUniEditRFInversionMethod = None
+
 
 METHODS = {
     "image_prompt_to_prompt": MethodSpec(
@@ -169,6 +174,7 @@ METHODS = {
             ("mask_glb", "--mask_glb"),
         ),
         requires_source_assets=True,
+        method_class=ImageUniEditRFInversionMethod,
     ),
     "image_slat_xor_fusion": MethodSpec(
         name="image_slat_xor_fusion",
