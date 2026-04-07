@@ -101,13 +101,15 @@ class ImagePromptToPromptMethod(EditMethod):
             )
 
         # Encode conditions
-        source_cond_dict = pipeline.encode_image(inputs.source_image)
-        edit_cond_dict = pipeline.encode_image(inputs.edit_image)
-        neg_cond_dict = pipeline.get_cond([""]) if hasattr(pipeline, "get_cond") else None
+        source_cond = pipeline.encode_image([inputs.source_image])
+        edit_cond = pipeline.encode_image([inputs.edit_image])
 
-        source_cond = source_cond_dict["image_cond"]
-        edit_cond = edit_cond_dict["image_cond"]
-        neg_cond = neg_cond_dict["text_cond"] if neg_cond_dict else torch.zeros_like(edit_cond)
+        # Build condition dicts for pipeline
+        source_cond_dict = {"image_cond": source_cond}
+        edit_cond_dict = {"image_cond": edit_cond}
+
+        # Get negative condition
+        neg_cond = torch.zeros_like(edit_cond)
 
         # Build token metadata
         patch_size = resolve_patch_size(pipeline.models["image_cond_model"].patch_size)
