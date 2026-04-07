@@ -84,7 +84,7 @@ class TextPromptToPromptMethod(EditMethod):
             edit_cond=edit_cond,
             source_prompt=source_prompt,
             edit_prompt=edit_prompt,
-            tokenizer=pipeline.tokenizer,
+            tokenizer=pipeline.text_cond_model['tokenizer'],
         )
 
         # Create hook
