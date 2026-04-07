@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Optional, Sequence, Type
 
 from editing.io.case_loader import EditingCase
 
@@ -19,6 +19,17 @@ class MethodSpec:
     path_args: tuple[tuple[str, str], ...] = ()
     requires_source_assets: bool = False
     source_assets_description: str = "RF inversion assets"
+    method_class: Optional[Type] = None  # New: optional method class
+
+    def has_method_class(self) -> bool:
+        """Check if this method has a method class implementation."""
+        return self.method_class is not None
+
+    def create_method(self):
+        """Create method instance if method_class is available."""
+        if self.method_class:
+            return self.method_class()
+        return None
 
     def validate_case(self, case: EditingCase) -> None:
         if self.requires_source_assets:
@@ -86,6 +97,13 @@ class MethodSpec:
         return args
 
 
+# Import method classes
+try:
+    from .image_prompt_to_prompt import ImagePromptToPromptMethod
+except ImportError:
+    ImagePromptToPromptMethod = None
+
+
 METHODS = {
     "image_prompt_to_prompt": MethodSpec(
         name="image_prompt_to_prompt",
@@ -97,6 +115,7 @@ METHODS = {
             ("edit_image", "--edit-image"),
             ("mask_image", "--mask-image"),
         ),
+        method_class=ImagePromptToPromptMethod,  # New: method class
     ),
     "image_prompt_to_prompt_rf_inversion": MethodSpec(
         name="image_prompt_to_prompt_rf_inversion",
