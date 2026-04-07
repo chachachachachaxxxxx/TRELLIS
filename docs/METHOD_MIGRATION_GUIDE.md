@@ -3,6 +3,7 @@
 ## 已完成
 
 ### 基础框架
+
 - ✅ `editing/methods/base.py` - 统一方法基类和接口
 - ✅ `editing/methods/runner.py` - 方法运行器
 - ✅ `editing/methods/__init__.py` - 模块导出
@@ -10,6 +11,7 @@
 ### 核心抽象
 
 **EditMethod** - 方法基类
+
 ```python
 class EditMethod(ABC):
     def prepare(pipeline, inputs, config) -> prepared_state
@@ -19,11 +21,13 @@ class EditMethod(ABC):
 ```
 
 **EditMethodRunner** - 运行器
+
 - 协调完整流程：预处理 → 准备 → 运行 → 保存 → 清理
 - 统一输出目录管理
 - 统一配置保存
 
 **数据类**
+
 - `EditMethodConfig` - 方法配置
 - `EditMethodInputs` - 方法输入
 - `EditMethodOutputs` - 方法输出
@@ -33,6 +37,7 @@ class EditMethod(ABC):
 ### 阶段 1：保持现有脚本可用
 
 当前策略：
+
 1. 新框架与现有脚本并存
 2. 现有脚本继续通过 `run_edit_experiment.py` 调用
 3. 逐步将方法实现迁移到 `editing/methods/` 下
@@ -47,6 +52,7 @@ class EditMethod(ABC):
    - 配置解析（如 `parse_stage_list`）
 
 2. **创建方法类**
+
    ```python
    # editing/methods/image_prompt_to_prompt.py
    class ImagePromptToPromptMethod(EditMethod):
@@ -83,12 +89,14 @@ METHODS = {
 ```
 
 支持两种调用方式：
+
 - 旧：通过 `script_path` 调用脚本
 - 新：通过 `method_class` 实例化方法类
 
 ### 阶段 4：逐步废弃脚本
 
 当方法类稳定后：
+
 1. 移除 `script_path`
 2. 将脚本移到 `legacy/` 或删除
 3. 更新文档
@@ -96,12 +104,14 @@ METHODS = {
 ## 优先级
 
 ### P0 - 立即完成
+
 - ✅ 创建基础框架（base, runner）
 - ⏳ 创建公共工具模块
   - `editing/hooks/` - Hook/Patch 工具
   - `editing/utils/` - 通用工具函数
 
 ### P1 - 近期完成
+
 - ⏳ 迁移第一个方法（建议：`image_prompt_to_prompt`）
   - 最简单，没有 RF inversion 复杂度
   - 验证框架设计是否合理
@@ -109,6 +119,7 @@ METHODS = {
   - 验证 inversion 相关抽象
 
 ### P2 - 后续完成
+
 - ⏳ 迁移其他方法
 - ⏳ 废弃旧脚本
 - ⏳ 完善文档和示例
@@ -116,6 +127,7 @@ METHODS = {
 ## 公共工具模块设计
 
 ### editing/hooks/
+
 ```
 editing/hooks/
 ├── __init__.py
@@ -125,6 +137,7 @@ editing/hooks/
 ```
 
 ### editing/utils/
+
 ```
 editing/utils/
 ├── __init__.py
@@ -134,6 +147,7 @@ editing/utils/
 ```
 
 ### editing/inversion/
+
 ```
 editing/inversion/
 ├── __init__.py
@@ -144,6 +158,7 @@ editing/inversion/
 ## 验证标准
 
 方法迁移完成的标准：
+
 1. ✅ 方法类实现了 `EditMethod` 接口
 2. ✅ 可以通过 `EditMethodRunner` 运行
 3. ✅ 输出与原脚本一致（相同 seed 下）

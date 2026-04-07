@@ -9,17 +9,20 @@
 ### 阶段 A：统一协议和输入处理 ✅
 
 #### A1. Case 初始化模板
+
 - **Commit:** `c54fd71`
 - `run_edit_experiment.py --init-case` 生成标准 case 目录
 - `manifest.json` 模板
 
 #### A2. 统一输入解析层
+
 - **Commit:** `f9074ac`, `74a6c00`
 - `editing/io/case_loader.py` - Case 加载
 - `editing/io/path_resolver.py` - 路径解析
 - 支持 manifest 和 CLI override
 
 #### A3. 统一预处理层
+
 - **Commit:** `385cdda`
 - `editing/preprocess/image_alignment.py` - 2D 图像预处理
 - `editing/preprocess/asset_3d.py` - 3D 资产预处理
@@ -29,6 +32,7 @@
 ### 阶段 B：方法实现拆离 ✅
 
 #### B1. 统一方法接口
+
 - **Commit:** `cb9f418`
 - `editing/methods/base.py` - EditMethod 基类
   - `prepare()` - 准备方法状态
@@ -40,6 +44,7 @@
   - 统一输出管理
 
 #### B2. 公共工具模块
+
 - **Commit:** `a8ff4c8`
 - `editing/utils/` - 通用工具
   - `token_utils.py` - Token 处理
@@ -49,6 +54,7 @@
 - `editing/inversion/` - Inversion 工具（占位）
 
 #### B3. Prompt-to-Prompt Hook
+
 - **Commit:** `2efee0a`
 - `editing/hooks/prompt_to_prompt.py`
   - PromptToPromptHook - 完整的 attention 注入实现
@@ -56,6 +62,7 @@
   - 支持密集和稀疏 attention
 
 #### B4. 第一个完整方法实现
+
 - **Commit:** `cc59c9d`
 - `editing/methods/image_prompt_to_prompt.py`
   - ImagePromptToPromptMethod - 完整方法类
@@ -64,11 +71,13 @@
 ### 阶段 C：实验 Runner ✅
 
 #### C1. 统一 CLI
+
 - **Commit:** `f9074ac`, `74a6c00`
 - `run_edit_experiment.py` - 统一入口
 - 数据驱动方法注册
 
 #### C3. 固定输出结构
+
 - **Commit:** 多个
 - `editing/common/output_layout.py`
 - 标准目录：`outputs/<method>/<case>/`
@@ -115,6 +124,7 @@ editing/
 ## 核心抽象
 
 ### EditMethod 接口
+
 ```python
 class EditMethod(ABC):
     def prepare(pipeline, inputs, config) -> prepared_state
@@ -124,11 +134,13 @@ class EditMethod(ABC):
 ```
 
 ### EditMethodRunner
+
 - 协调：预处理 → 准备 → 运行 → 保存 → 清理
 - 统一输出目录管理
 - 自动 cleanup
 
 ### AttentionHook
+
 - 独立的 attention 注入机制
 - 自动保存和恢复状态
 - 可被多个方法复用
@@ -136,6 +148,7 @@ class EditMethod(ABC):
 ## 验证标准
 
 ### 框架验证 ✅
+
 1. ✅ EditMethod 接口清晰易用
 2. ✅ EditMethodRunner 协调流程顺畅
 3. ✅ Hook 机制独立可复用
@@ -143,6 +156,7 @@ class EditMethod(ABC):
 5. ✅ 向后兼容现有脚本
 
 ### 代码质量 ✅
+
 - 所有模块通过语法检查
 - 导入测试通过
 - 功能单元测试通过（预处理层）
@@ -150,9 +164,11 @@ class EditMethod(ABC):
 ## 迁移状态
 
 ### 已迁移 ✅
+
 - `image_prompt_to_prompt` - 完整方法类实现
 
 ### 待迁移 ⏳
+
 - `image_prompt_to_prompt_rf_inversion`
 - `image_uniedit_rf_inversion`
 - `image_slat_xor_fusion`
@@ -161,6 +177,7 @@ class EditMethod(ABC):
 - `text_cross_attention`
 
 ### 迁移策略
+
 1. 保持现有脚本可用（script_path）
 2. 逐步添加方法类（method_class）
 3. 两种方式共存
@@ -169,15 +186,18 @@ class EditMethod(ABC):
 ## 使用方式
 
 ### 旧方式（脚本）
+
 ```bash
 python run_edit_experiment.py \
   --method image_prompt_to_prompt \
   --case cases/cat_to_tiger \
   --seed 1
 ```
+
 → 调用 `example_image_prompt_to_prompt.py`
 
 ### 新方式（方法类）
+
 ```python
 from editing.methods import ImagePromptToPromptMethod, EditMethodRunner
 
@@ -189,16 +209,19 @@ outputs = runner.run(...)
 ## 下一步计划
 
 ### 短期（P0）
+
 1. 更新 `run_edit_experiment.py` 支持方法类调用
 2. 测试新方法类与原脚本输出一致性
 3. 抽离 RF inversion 公共工具
 
 ### 中期（P1）
+
 1. 迁移 `image_prompt_to_prompt_rf_inversion`
 2. 迁移 `image_uniedit_rf_inversion`
 3. 完善文档和示例
 
 ### 长期（P2）
+
 1. 迁移所有方法
 2. 废弃旧脚本
 3. 添加批量对比 runner（C2）
@@ -213,18 +236,21 @@ outputs = runner.run(...)
 ## 成果
 
 ### 代码质量提升
+
 - 关注点分离：预处理、方法逻辑、I/O 管理
 - 可复用性：公共工具、Hook、预处理层
 - 可测试性：每个模块职责单一
 - 可维护性：清晰的模块边界
 
 ### 实验效率提升
+
 - 统一输入格式：同一 case 可被多方法复用
 - 统一预处理：消除预处理差异
 - 统一输出：便于横向比较
 - 自动配置保存：完整可复现
 
 ### 开发体验提升
+
 - 新增方法无需复制千行脚本
 - 公共逻辑在框架中复用
 - 清晰的接口和文档

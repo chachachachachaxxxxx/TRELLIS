@@ -7,14 +7,17 @@
 抽离了 3D 资产预处理逻辑，包括：
 
 #### PLY 文件处理
+
 - **`load_ply_positions()`** - 从 PLY 加载顶点坐标（支持 utils3d 和 trimesh）
 - **`ply_to_coords()`** - PLY 坐标转换为 64³ 体素坐标
 - **`coords_to_voxel()`** - 稀疏坐标转换为密集体素张量
 
 #### SLAT 特征处理
+
 - **`feats_to_slat()`** - 从 features.npz 加载并编码 SLAT 特征
 
 #### 3D Mask 处理
+
 - **`load_source_voxel_normalization()`** - 加载 transforms.json 归一化参数
 - **`load_mask_glb_coords()`** - 从 GLB 或预生成 PLY 加载 3D mask 坐标
   - 策略 1: 读取 voxels_delete.ply
@@ -22,11 +25,13 @@
 - **`_load_mask_mesh()`** - 加载并验证 mask mesh
 
 #### RF Inversion 工具
+
 - **`coords_to_flat_indices()`** - 3D/4D 坐标转换为扁平索引
 - **`sparse_batch_slice()`** - 提取 batch 的坐标和特征
 - **`project_sparse_terminal_noise()`** - 将源噪声投影到目标坐标
 
 #### 数据类
+
 - **`VoxelNormalization`** - 体素归一化元数据
 - **`MaskGLBResult`** - 3D mask 加载结果
 
@@ -50,13 +55,16 @@
 ### 4. 验证实现 ✅
 
 #### 语法验证
+
 ```bash
 python -m compileall editing/preprocess/asset_3d.py editing/preprocess/__init__.py \
   editing/io/path_resolver.py editing/io/__init__.py
 ```
+
 ✓ 所有文件编译通过
 
 #### 导入验证
+
 ```python
 from editing.preprocess import (
     load_ply_positions, ply_to_coords, coords_to_voxel,
@@ -69,18 +77,23 @@ from editing.io import (
     SOURCE_RENDER_CANDIDATES,
 )
 ```
+
 ✓ 所有导入成功
 
 #### 功能验证
+
 创建并运行 `test_preprocess_validation.py`：
+
 - ✓ 2D 图像预处理（mask 工具、对齐输入）
 - ✓ 3D 资产预处理（坐标转换、归一化）
 - ✓ 路径解析（文件查找、目录解析）
 
 #### 实际脚本验证
+
 ```python
 import example_image_prompt_to_prompt
 ```
+
 ✓ 现有脚本能正常导入和使用新模块
 
 ## 预处理模块架构
@@ -102,6 +115,7 @@ editing/io/
 ## 已有实现（之前完成）
 
 ### 2D 图像预处理
+
 - `extract_foreground_rgba()` - 前景提取（RGBA/rembg）
 - `build_union_crop_context()` - 联合裁剪上下文
 - `prepare_aligned_inputs()` - 主预处理入口
@@ -112,6 +126,7 @@ editing/io/
 - `binarize_mask_image()` - 二值化 mask
 
 ### 输出保存
+
 - `save_preprocessed_inputs()` - 保存预处理结果
 - `save_edit_condition_artifacts()` - 保存编辑条件
 
@@ -122,6 +137,7 @@ editing/io/
 现在预处理层已经完成，可以开始：
 
 1. **定义统一方法接口** - `editing/methods/base.py`
+
    ```python
    class EditMethod:
        method_name: str
@@ -146,6 +162,7 @@ editing/io/
 ## 验证方式
 
 所有改动都经过：
+
 1. Python 语法检查（`compileall`）
 2. 导入测试
 3. 功能单元测试
