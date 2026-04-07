@@ -49,6 +49,69 @@
 | 数据读取 | `trellis/datasets/`、`dataset_toolkits/` |
 | 渲染、GLB 导出、mesh | `trellis/utils/render_utils.py`、`trellis/utils/postprocessing_utils.py`、`trellis/renderers/` |
 | 网络、attention | `trellis/models/`、`trellis/modules/` |
+| **编辑实验框架** | `editing/` - 统一的编辑方法框架 |
+| **编辑方法运行** | `run_edit_experiment.py` - 统一入口 |
+
+## 编辑实验框架（新）
+
+重构后的编辑实验框架位于 `editing/` 目录：
+
+### 目录结构
+
+```
+editing/
+├── methods/          # 方法类实现
+│   ├── base.py      # EditMethod 抽象基类
+│   ├── runner.py    # EditMethodRunner 编排器
+│   ├── registry.py  # 方法注册表
+│   └── *.py         # 具体方法实现
+├── hooks/           # Hook 系统（Prompt-to-Prompt 等）
+├── inversion/       # RF inversion 工具
+├── preprocess/      # 预处理层
+├── utils/           # 工具函数
+├── io/              # 输入输出处理
+└── common/          # 公共工具
+```
+
+### 运行编辑方法
+
+使用统一入口 `run_edit_experiment.py`：
+
+```bash
+# Image Prompt-to-Prompt
+python run_edit_experiment.py \
+  --method image_prompt_to_prompt \
+  --source-image path/to/source.png \
+  --edit-image path/to/edit.png \
+  --mask-image path/to/mask.png \
+  --case-name my_edit \
+  --seed 1
+
+# Text Prompt-to-Prompt
+python run_edit_experiment.py \
+  --method text_prompt_to_prompt \
+  --source-prompt "a cute cat statue" \
+  --edit-prompt "a cute tiger statue" \
+  --case-name text_edit \
+  --seed 1
+
+# SLAT XOR Fusion
+python run_edit_experiment.py \
+  --method image_slat_xor_fusion \
+  --source-model path/to/source/assets \
+  --edit-image path/to/edit.png \
+  --case-name fusion_edit \
+  --seed 1
+```
+
+### 添加新方法
+
+1. 创建方法类继承 `EditMethod`
+2. 实现 `prepare()`, `run()`, `save_artifacts()`, `cleanup()`
+3. 在 `registry.py` 中注册
+4. 自动支持统一的 CLI 和配置管理
+
+详见 `docs/METHOD_MIGRATION_GUIDE.md`
 
 ## 验证方式
 
@@ -57,7 +120,7 @@
 ### Python 结构改动
 
 ```bash
-python -m compileall trellis app.py app_text.py train.py
+python -m compileall trellis editing run_edit_experiment.py
 ```
 
 ### 推理链路改动
@@ -65,24 +128,26 @@ python -m compileall trellis app.py app_text.py train.py
 运行最小相关示例，减少步数做 smoke test：
 
 ```bash
-python example.py
-python example_text.py
-python example_multi_image.py
+# 基础推理（已移至 trellis_inference/）
+python trellis_inference/example.py
+python trellis_inference/example_text.py
+
+# 编辑方法
+python run_edit_experiment.py --method image_prompt_to_prompt --case test_case --seed 1
 ```
 
-### Demo 改动
+### 编辑方法验证
 
 ```bash
-python app.py
-python app_text.py
-```
-
-### 训练改动
-
-使用 dry run 模式：
-
-```bash
-python train.py --config configs/vae/slat_vae_dec_mesh_swin8_B_64l8_fp16.json --output_dir outputs/tryrun --data_dir /path/to/data --tryrun
+# 测试特定方法
+python run_edit_experiment.py \
+  --method <method_name> \
+  --source-image assets/edit_example/images/2d_render.png \
+  --edit-image assets/edit_example/images/2d_edit.png \
+  --mask-image assets/edit_example/images/2d_mask.png \
+  --case-name test \
+  --seed 1 \
+  --preprocess
 ```
 
 ## 输出目录组织
