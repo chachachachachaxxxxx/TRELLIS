@@ -2,6 +2,12 @@
 
 这是一个基于 Python/PyTorch 的 3D 生成项目（text-to-3D、image-to-3D）。在此仓库工作时请遵循以下指南。
 
+## 📋 重要文档
+
+- **重构状态**: `docs/REFACTORING_STATUS.md` - 编辑实验框架重构的完整状态报告
+- **迁移指南**: `docs/METHOD_MIGRATION_GUIDE.md` - 如何迁移和添加新方法
+- **测试报告**: `docs/REFACTORING_TEST_REPORT.md` - 测试结果和验证状态
+
 ## 环境
 
 - 除非明确要求，始终使用 `hammer` conda 环境
@@ -172,3 +178,24 @@ outputs/<method_name>/<case_name>/
 
 - 运行了什么验证
 - 没有运行什么验证
+
+## 📊 当前重构状态
+
+### 编辑实验框架重构进度: 71% 完成
+
+- ✅ 核心框架: 100% (预处理、方法接口、Hook、Inversion)
+- ✅ 方法迁移: 5/7 (71%)
+  - ✅ image_prompt_to_prompt - 测试通过
+  - ⚠️ text_prompt_to_prompt - 核心逻辑验证
+  - ✅ image_slat_xor_fusion - 待测试
+  - ✅ image_prompt_to_prompt_rf_inversion - 待测试
+  - ⚠️ image_uniedit_rf_inversion - 占位符
+- ✅ 问题修复: 6/6 (100%)
+- ✅ 文档更新: 100%
+
+### 待完成工作
+1. 完整实现 UniEdit 方法
+2. 测试 SLAT fusion 和 RF inversion 方法
+3. 优化 text 方法显存使用
+
+详见 `docs/REFACTORING_STATUS.md`
