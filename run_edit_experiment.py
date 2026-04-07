@@ -71,6 +71,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--edit-image", default="", help="Override edited target image.")
     parser.add_argument("--mask-image", default="", help="Override 2D edit mask.")
     parser.add_argument("--mask-glb", default="", help="Override 3D edit mask GLB/GLTF.")
+    parser.add_argument(
+        "--init-case",
+        default="",
+        help="Create a standard editing case directory with source/, edit/, and manifest.json, then exit.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Resolve inputs and print the method command without running it.")
     return parser
 
@@ -94,6 +99,43 @@ def normalize_passthrough_args(extra_args: list[str]) -> list[str]:
     return extra_args
 
 
+def build_case_manifest_template(case_name: str) -> dict:
+    return {
+        "case_name": sanitize_name(case_name, fallback="case"),
+        "notes": "",
+        "defaults": {
+            "model": "microsoft/TRELLIS-image-large",
+            "seed": 1,
+            "preprocess": True,
+            "spconv_algo": "native",
+        },
+        "source": {
+            "dir": "source",
+        },
+        "edit": {
+            "dir": "edit",
+        },
+        "methods": {
+            spec.name: {
+                "args": [],
+            }
+            for spec in list_methods()
+        },
+    }
+
+
+def init_case_directory(case_dir: Path) -> Path:
+    case_dir = case_dir.expanduser().resolve()
+    manifest_path = case_dir / "manifest.json"
+    if manifest_path.exists():
+        raise RuntimeError(f"Refusing to overwrite existing manifest: {manifest_path}")
+
+    ensure_dir(case_dir / "source")
+    ensure_dir(case_dir / "edit")
+    write_json(manifest_path, build_case_manifest_template(case_dir.name))
+    return manifest_path
+
+
 def main() -> int:
     parser = build_parser()
     args, extra_args = parser.parse_known_args()
@@ -103,8 +145,15 @@ def main() -> int:
         print_methods()
         return 0
 
+    if args.init_case:
+        manifest_path = init_case_directory(Path(args.init_case))
+        print(f"Created editing case template: {manifest_path}")
+        print(f"Put source assets under: {manifest_path.parent / 'source'}")
+        print(f"Put edit assets under: {manifest_path.parent / 'edit'}")
+        return 0
+
     if not args.method:
-        parser.error("--method is required unless --list-methods is used.")
+        parser.error("--method is required unless --list-methods or --init-case is used.")
 
     method = get_method(args.method)
     case = load_case(args.case or None)

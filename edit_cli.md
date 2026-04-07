@@ -36,6 +36,12 @@ python run_edit_experiment.py \
 也可以先整理成标准 case 目录，再直接用统一入口：
 
 ```bash
+python run_edit_experiment.py --init-case cases/cat_to_tiger
+```
+
+把资产放入 `source/` 和 `edit/` 后运行：
+
+```bash
 python run_edit_experiment.py \
   --method image_prompt_to_prompt_rf_inversion \
   --case cases/cat_to_tiger \
@@ -51,9 +57,11 @@ cases/<case_name>/
     voxels.ply
     features.npz
     2d_render.png
+    model.glb
   edit/
     2d_edit.png
+    2d_mask.png
     mask.glb
 ```
 
-`manifest.json` 可以只写需要覆盖默认推断的字段；如果目录遵循上面的约定，`run_edit_experiment.py` 会自动补齐常见路径。
+`manifest.json` 可以只写需要覆盖默认推断的字段；如果目录遵循上面的约定，`run_edit_experiment.py` 会自动补齐常见路径。`methods.<method_name>.args` 可以填写某个方法专属的额外参数，例如 `["--continue-after-mask-preview"]`。

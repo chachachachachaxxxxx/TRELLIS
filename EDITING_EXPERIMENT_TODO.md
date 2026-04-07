@@ -109,6 +109,15 @@
 
 ## 4. 重构优先级
 
+### 当前落地状态
+
+- A1 已有雏形：`run_edit_experiment.py --init-case cases/<case_name>` 会生成标准 case 目录和 `manifest.json` 模板。
+- A2 已有雏形：`editing/io/case_loader.py` 和 `editing/io/path_resolver.py` 负责读取 manifest、标准目录推断和 CLI override。
+- C1 已有雏形：`run_edit_experiment.py` 已能按注册方法分发到现有 `example_image_*.py` 脚本。
+- C3 已有雏形：`editing/common/output_layout.py` 和 runner 已固定 `outputs/<method>/<case>/...`、`artifacts/`、`logs/`。
+- A3 仍未完成：source/edit/mask 预处理仍主要留在各方法脚本中，还没有统一的 `editing/preprocess/` 层。
+- B1 仍是薄封装：`editing/methods/registry.py` 现在是数据驱动注册表，但方法实现仍由顶层实验脚本承载。
+
 ## 阶段 A：先统一协议，不急着做大重构
 
 ### A1. 定义统一 case 格式
@@ -122,6 +131,7 @@ cases/<case_name>/
     voxels.ply
     features.npz
     2d_render.png
+    model.glb
   edit/
     2d_edit.png
     2d_mask.png
@@ -314,4 +324,3 @@ outputs/<method>/<case>/
 - 每次运行都会自动保存完整配置和输入快照
 - 可以用一条命令在 `hammer` 环境下复现实验
 - 新增一个方法时，不需要复制上千行旧脚本
-
