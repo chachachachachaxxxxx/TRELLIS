@@ -326,7 +326,10 @@ def main() -> int:
     method.validate_case(case)
 
     effective_case_name = sanitize_name(case.case_name, fallback=method.name)
-    effective_model = resolve_effective_value(args.model, case.defaults, "model", "microsoft/TRELLIS-image-large")
+
+    # Choose default model based on method type
+    default_model = "microsoft/TRELLIS-text-large" if "text" in method.name else "microsoft/TRELLIS-image-large"
+    effective_model = resolve_effective_value(args.model, case.defaults, "model", default_model)
     effective_seed = resolve_effective_value(case.seed, case.defaults, "seed")
     if args.seed is not None:
         effective_seed = args.seed
