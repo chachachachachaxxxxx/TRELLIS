@@ -9,10 +9,11 @@ python run_edit_experiment.py \
   --seed 1
 
 conda activate hammer
-python example_image_slat_xor_fusion.py \
-  --source-model outputs/rf_p2p/render \
+python run_edit_experiment.py \
+  --method image_slat_xor_fusion \
+  --render-dir outputs/rf_p2p/render \
   --edit-image assets/edit_example/images/2d_edit.png \
-  --output_path outputs/image_slat_xor_fusion/output.glb
+  --seed 1
 
 ```
 

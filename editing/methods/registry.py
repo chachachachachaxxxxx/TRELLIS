@@ -15,50 +15,25 @@ class MethodSpec:
     name: str
     script_path: Path
     description: str
+    required_fields: tuple[str, ...] = ()
+    path_args: tuple[tuple[str, str], ...] = ()
+    requires_source_assets: bool = False
+    source_assets_description: str = "RF inversion assets"
 
     def validate_case(self, case: EditingCase) -> None:
-        if self.name == "image_prompt_to_prompt":
-            missing = []
-            if case.source_image is None:
-                missing.append("source_image")
-            if case.edit_image is None:
-                missing.append("edit_image")
-            if case.mask_image is None:
-                missing.append("mask_image")
-            if missing:
-                raise RuntimeError(
-                    f"Method '{self.name}' requires {', '.join(missing)}. "
-                    "Provide them via manifest or CLI overrides."
-                )
-            return
-
-        if self.name == "image_prompt_to_prompt_rf_inversion":
+        if self.requires_source_assets:
             if case.source_model is None and case.render_dir is None:
                 raise RuntimeError(
-                    f"Method '{self.name}' requires either source_model or render_dir for RF inversion assets."
+                    f"Method '{self.name}' requires either source_model or render_dir for "
+                    f"{self.source_assets_description}."
                 )
-            if case.edit_image is None:
-                raise RuntimeError(
-                    f"Method '{self.name}' requires edit_image. Provide it via manifest or CLI override."
-                )
-            return
 
-        if self.name == "image_uniedit_rf_inversion":
-            if case.source_model is None and case.render_dir is None:
-                raise RuntimeError(
-                    f"Method '{self.name}' requires either source_model or render_dir for RF inversion assets."
-                )
-            if case.edit_image is None:
-                raise RuntimeError(
-                    f"Method '{self.name}' requires edit_image. Provide it via manifest or CLI override."
-                )
-            if case.mask_glb is None:
-                raise RuntimeError(
-                    f"Method '{self.name}' requires mask_glb. Provide it via manifest or CLI override."
-                )
-            return
-
-        raise RuntimeError(f"Unknown method registry validation rule for: {self.name}")
+        missing = [field for field in self.required_fields if getattr(case, field) is None]
+        if missing:
+            raise RuntimeError(
+                f"Method '{self.name}' requires {', '.join(missing)}. "
+                "Provide them via manifest or CLI overrides."
+            )
 
     def build_command_args(
         self,
@@ -95,28 +70,16 @@ class MethodSpec:
         if skip_ply:
             args.append("--skip-ply")
 
-        if self.name == "image_prompt_to_prompt":
-            args.extend(["--source-image", str(case.source_image)])
-            args.extend(["--edit-image", str(case.edit_image)])
-            args.extend(["--mask-image", str(case.mask_image)])
-        elif self.name in {"image_prompt_to_prompt_rf_inversion", "image_uniedit_rf_inversion"}:
+        if self.requires_source_assets:
             if case.render_dir is not None:
                 args.extend(["--render_dir", str(case.render_dir)])
             elif case.source_model is not None:
                 args.extend(["--source-model", str(case.source_model)])
 
-            if case.input_model is not None:
-                args.extend(["--input_model", str(case.input_model)])
-            if case.source_image is not None:
-                args.extend(["--source-image", str(case.source_image)])
-            if case.edit_image is not None:
-                args.extend(["--edit-image", str(case.edit_image)])
-            if self.name == "image_prompt_to_prompt_rf_inversion" and case.mask_image is not None:
-                args.extend(["--mask-image", str(case.mask_image)])
-            if self.name == "image_uniedit_rf_inversion" and case.mask_glb is not None:
-                args.extend(["--mask_glb", str(case.mask_glb)])
-        else:
-            raise RuntimeError(f"Unknown method: {self.name}")
+        for field_name, flag in self.path_args:
+            value = getattr(case, field_name)
+            if value is not None:
+                args.extend([flag, str(value)])
 
         args.extend(str(arg) for arg in manifest_extra_args)
         args.extend(str(arg) for arg in extra_args)
@@ -128,16 +91,47 @@ METHODS = {
         name="image_prompt_to_prompt",
         script_path=REPO_ROOT / "example_image_prompt_to_prompt.py",
         description="Pure image Prompt-to-Prompt editing on aligned source/edit/mask inputs.",
+        required_fields=("source_image", "edit_image", "mask_image"),
+        path_args=(
+            ("source_image", "--source-image"),
+            ("edit_image", "--edit-image"),
+            ("mask_image", "--mask-image"),
+        ),
     ),
     "image_prompt_to_prompt_rf_inversion": MethodSpec(
         name="image_prompt_to_prompt_rf_inversion",
         script_path=REPO_ROOT / "example_image_prompt_to_prompt_rf_inversion.py",
         description="RF inversion initialization plus image Prompt-to-Prompt cross-attention injection.",
+        required_fields=("edit_image",),
+        path_args=(
+            ("input_model", "--input_model"),
+            ("source_image", "--source-image"),
+            ("edit_image", "--edit-image"),
+            ("mask_image", "--mask-image"),
+        ),
+        requires_source_assets=True,
     ),
     "image_uniedit_rf_inversion": MethodSpec(
         name="image_uniedit_rf_inversion",
         script_path=REPO_ROOT / "example_image_uniedit_rf_inversion.py",
         description="RF inversion initialization plus UniEdit-style two-stage voxel editing.",
+        required_fields=("edit_image", "mask_glb"),
+        path_args=(
+            ("input_model", "--input_model"),
+            ("source_image", "--source-image"),
+            ("edit_image", "--edit-image"),
+            ("mask_glb", "--mask_glb"),
+        ),
+        requires_source_assets=True,
+    ),
+    "image_slat_xor_fusion": MethodSpec(
+        name="image_slat_xor_fusion",
+        script_path=REPO_ROOT / "example_image_slat_xor_fusion.py",
+        description="Post-hoc SLAT block fusion that reuses source overlap and keeps target-only edit voxels.",
+        required_fields=("edit_image",),
+        path_args=(("edit_image", "--edit-image"),),
+        requires_source_assets=True,
+        source_assets_description="source SLAT assets",
     ),
 }
 

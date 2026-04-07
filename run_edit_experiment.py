@@ -88,9 +88,16 @@ def resolve_effective_value(args_value, case_defaults: dict, key: str, fallback=
     return fallback
 
 
+def normalize_passthrough_args(extra_args: list[str]) -> list[str]:
+    if extra_args and extra_args[0] == "--":
+        return extra_args[1:]
+    return extra_args
+
+
 def main() -> int:
     parser = build_parser()
     args, extra_args = parser.parse_known_args()
+    extra_args = normalize_passthrough_args(list(extra_args))
 
     if args.list_methods:
         print_methods()
