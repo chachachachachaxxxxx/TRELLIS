@@ -108,6 +108,11 @@ try:
 except ImportError:
     TextPromptToPromptMethod = None
 
+try:
+    from .image_slat_xor_fusion import ImageSlatXorFusionMethod
+except ImportError:
+    ImageSlatXorFusionMethod = None
+
 
 METHODS = {
     "image_prompt_to_prompt": MethodSpec(
@@ -167,6 +172,8 @@ METHODS = {
         path_args=(("edit_image", "--edit-image"),),
         requires_source_assets=True,
         source_assets_description="source SLAT assets",
+        method_class=ImageSlatXorFusionMethod,
+    ),
     ),
 }
 
