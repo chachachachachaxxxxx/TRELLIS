@@ -71,6 +71,8 @@ class EditingCase:
     edit_image: Path | None
     mask_image: Path | None
     mask_glb: Path | None
+    source_prompt: str | None
+    edit_prompt: str | None
     seed: int | None
     notes: str
     defaults: dict[str, Any]
@@ -94,6 +96,8 @@ class EditingCase:
             "edit_image": str(self.edit_image) if self.edit_image is not None else None,
             "mask_image": str(self.mask_image) if self.mask_image is not None else None,
             "mask_glb": str(self.mask_glb) if self.mask_glb is not None else None,
+            "source_prompt": self.source_prompt,
+            "edit_prompt": self.edit_prompt,
             "seed": self.seed,
             "notes": self.notes,
             "defaults": self.defaults,
@@ -246,6 +250,10 @@ def load_case(case_ref: str | Path | None = None) -> EditingCase:
         if mask_glb is not None:
             inferred_fields.append("mask_glb")
 
+    # Load text prompts
+    source_prompt = _string_or_empty(source_section.get("prompt") or raw_manifest.get("source_prompt")).strip() or None
+    edit_prompt = _string_or_empty(edit_section.get("prompt") or raw_manifest.get("edit_prompt")).strip() or None
+
     case_name = _string_or_empty(raw_manifest.get("case_name") or raw_manifest.get("name")).strip()
     if not case_name:
         case_name = base_dir.name if case_dir is not None else "adhoc_case"
@@ -262,6 +270,8 @@ def load_case(case_ref: str | Path | None = None) -> EditingCase:
         edit_image=edit_image,
         mask_image=mask_image,
         mask_glb=mask_glb,
+        source_prompt=source_prompt,
+        edit_prompt=edit_prompt,
         seed=_int_or_none(raw_manifest.get("seed") or defaults.get("seed")),
         notes=_string_or_empty(raw_manifest.get("notes")).strip(),
         defaults=defaults,
@@ -282,6 +292,8 @@ def apply_case_overrides(
     edit_image: str = "",
     mask_image: str = "",
     mask_glb: str = "",
+    source_prompt: str = "",
+    edit_prompt: str = "",
 ) -> EditingCase:
     cwd = Path.cwd().resolve()
     updates: dict[str, Any] = {}
@@ -290,6 +302,10 @@ def apply_case_overrides(
         updates["case_name"] = case_name.strip()
     if seed is not None:
         updates["seed"] = int(seed)
+    if source_prompt.strip():
+        updates["source_prompt"] = source_prompt.strip()
+    if edit_prompt.strip():
+        updates["edit_prompt"] = edit_prompt.strip()
 
     path_overrides = {
         "source_model": (source_model, "source_model", "any"),
