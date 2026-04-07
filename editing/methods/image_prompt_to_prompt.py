@@ -269,7 +269,7 @@ class ImagePromptToPromptMethod(EditMethod):
             "patch_coverage_threshold": 0.0,
             "query_chunk": 1024,
             "skip_source": False,
-            "skip_render": False,
+            "skip_render": True,  # Skip video rendering by default
             "skip_glb": False,
             "skip_ply": False,
         }
