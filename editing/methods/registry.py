@@ -103,6 +103,11 @@ try:
 except ImportError:
     ImagePromptToPromptMethod = None
 
+try:
+    from .text_prompt_to_prompt import TextPromptToPromptMethod
+except ImportError:
+    TextPromptToPromptMethod = None
+
 
 METHODS = {
     "image_prompt_to_prompt": MethodSpec(
@@ -115,7 +120,18 @@ METHODS = {
             ("edit_image", "--edit-image"),
             ("mask_image", "--mask-image"),
         ),
-        method_class=ImagePromptToPromptMethod,  # New: method class
+        method_class=ImagePromptToPromptMethod,
+    ),
+    "text_prompt_to_prompt": MethodSpec(
+        name="text_prompt_to_prompt",
+        script_path=REPO_ROOT / "example_text_prompt_to_prompt.py",
+        description="Text Prompt-to-Prompt editing with token alignment.",
+        required_fields=("source_prompt", "edit_prompt"),
+        path_args=(
+            ("source_prompt", "--source-prompt"),
+            ("edit_prompt", "--edit-prompt"),
+        ),
+        method_class=TextPromptToPromptMethod,
     ),
     "image_prompt_to_prompt_rf_inversion": MethodSpec(
         name="image_prompt_to_prompt_rf_inversion",
