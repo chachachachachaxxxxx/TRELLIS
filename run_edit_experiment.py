@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+from PIL import Image
 
 from editing.common import (
     apply_backend_env,
@@ -17,7 +20,7 @@ from editing.common import (
     write_json,
 )
 from editing.io.case_loader import apply_case_overrides, load_case, summarize_case
-from editing.methods import get_method, list_methods
+from editing.methods import EditMethodConfig, EditMethodRunner, get_method, list_methods
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -136,6 +139,119 @@ def init_case_directory(case_dir: Path) -> Path:
     return manifest_path
 
 
+def run_method_class(
+    method_spec,
+    case,
+    effective_case_name: str,
+    effective_model: str,
+    effective_seed: int,
+    effective_preprocess: bool,
+    backend,
+    skip_render: bool,
+    skip_glb: bool,
+    skip_ply: bool,
+    extra_args: list,
+) -> int:
+    """Run method using method class (new way).
+
+    Args:
+        method_spec: MethodSpec with method_class
+        case: EditingCase
+        effective_case_name: Case name
+        effective_model: Model path
+        effective_seed: Seed
+        effective_preprocess: Preprocess flag
+        backend: Backend config
+        skip_render: Skip render flag
+        skip_glb: Skip GLB flag
+        skip_ply: Skip PLY flag
+        extra_args: Extra CLI args
+
+    Returns:
+        Exit code (0 for success)
+    """
+    # Apply backend environment
+    for key, value in backend.env.items():
+        os.environ[key] = value
+
+    # Load pipeline
+    print(f"Loading pipeline: {effective_model}")
+    from trellis.pipelines import TrellisImageTo3DPipeline
+
+    pipeline = TrellisImageTo3DPipeline.from_pretrained(effective_model)
+    pipeline.cuda()
+
+    # Load images
+    source_image = Image.open(case.source_image) if case.source_image else None
+    edit_image = Image.open(case.edit_image) if case.edit_image else None
+    mask_image = Image.open(case.mask_image) if case.mask_image else None
+
+    if source_image is None or edit_image is None:
+        raise RuntimeError("Method class requires source_image and edit_image")
+
+    # Parse extra args into config
+    extra_params = {
+        "skip_source": False,
+        "skip_render": skip_render,
+        "skip_glb": skip_glb,
+        "skip_ply": skip_ply,
+    }
+
+    # Parse extra args (simple key=value parsing)
+    for arg in extra_args:
+        if "=" in arg:
+            key, value = arg.split("=", 1)
+            key = key.lstrip("-").replace("-", "_")
+            # Try to parse as number or bool
+            if value.lower() in ("true", "false"):
+                extra_params[key] = value.lower() == "true"
+            elif value.isdigit():
+                extra_params[key] = int(value)
+            else:
+                try:
+                    extra_params[key] = float(value)
+                except ValueError:
+                    extra_params[key] = value
+
+    # Build config
+    config = EditMethodConfig(
+        method_name=method_spec.name,
+        seed=effective_seed,
+        num_samples=1,
+        extra_params=extra_params,
+    )
+
+    # Create method and runner
+    method = method_spec.create_method()
+    runner = EditMethodRunner(method, pipeline)
+
+    # Run
+    print(f"Running method: {method_spec.name}")
+    print(f"Case: {effective_case_name}")
+    print(f"Seed: {effective_seed}")
+
+    try:
+        runner.run(
+            source_image=source_image,
+            edit_image=edit_image,
+            mask_image=mask_image,
+            config=config,
+            case_name=effective_case_name,
+            preprocess=effective_preprocess,
+            source_voxels_path=case.source_model / "voxels.ply" if case.source_model else None,
+            source_features_path=case.source_model / "features.npz" if case.source_model else None,
+            mask_glb_path=case.mask_glb,
+            asset_dir=case.source_model or case.render_dir,
+        )
+        print(f"✓ Method completed successfully")
+        return 0
+    except Exception as e:
+        print(f"✗ Method failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+
 def main() -> int:
     parser = build_parser()
     args, extra_args = parser.parse_known_args()
@@ -202,6 +318,26 @@ def main() -> int:
         )
 
     layout = build_experiment_output_layout(method.name, effective_case_name)
+
+    # Check if method has a method class implementation
+    if method.has_method_class():
+        print(f"Using method class for: {method.name}")
+        return run_method_class(
+            method_spec=method,
+            case=case,
+            effective_case_name=effective_case_name,
+            effective_model=str(effective_model),
+            effective_seed=effective_seed,
+            effective_preprocess=effective_preprocess,
+            backend=backend,
+            skip_render=bool(args.skip_render),
+            skip_glb=bool(args.skip_glb),
+            skip_ply=bool(args.skip_ply),
+            extra_args=extra_args,
+        )
+
+    # Fallback to script-based execution (legacy)
+    print(f"Using legacy script for: {method.name}")
     command = [
         sys.executable,
         str(method.script_path),
