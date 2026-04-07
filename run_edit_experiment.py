@@ -176,20 +176,36 @@ def run_method_class(
     for key, value in backend.env.items():
         os.environ[key] = value
 
+    # Determine pipeline type based on method
+    is_text_method = "text" in method_spec.name
+
     # Load pipeline
     print(f"Loading pipeline: {effective_model}")
-    from trellis.pipelines import TrellisImageTo3DPipeline
-
-    pipeline = TrellisImageTo3DPipeline.from_pretrained(effective_model)
+    if is_text_method:
+        from trellis.pipelines import TrellisTextTo3DPipeline
+        pipeline = TrellisTextTo3DPipeline.from_pretrained(effective_model)
+    else:
+        from trellis.pipelines import TrellisImageTo3DPipeline
+        pipeline = TrellisImageTo3DPipeline.from_pretrained(effective_model)
     pipeline.cuda()
 
-    # Load images
-    source_image = Image.open(case.source_image) if case.source_image else None
-    edit_image = Image.open(case.edit_image) if case.edit_image else None
-    mask_image = Image.open(case.mask_image) if case.mask_image else None
-
-    if source_image is None or edit_image is None:
-        raise RuntimeError("Method class requires source_image and edit_image")
+    # Load inputs based on method type
+    if is_text_method:
+        source_prompt = case.source_prompt
+        edit_prompt = case.edit_prompt
+        if not source_prompt or not edit_prompt:
+            raise RuntimeError("Text method requires source_prompt and edit_prompt")
+        source_image = None
+        edit_image = None
+        mask_image = None
+    else:
+        source_image = Image.open(case.source_image) if case.source_image else None
+        edit_image = Image.open(case.edit_image) if case.edit_image else None
+        mask_image = Image.open(case.mask_image) if case.mask_image else None
+        if source_image is None or edit_image is None:
+            raise RuntimeError("Image method requires source_image and edit_image")
+        source_prompt = None
+        edit_prompt = None
 
     # Parse extra args into config
     extra_params = {
@@ -233,6 +249,12 @@ def run_method_class(
     print(f"Seed: {effective_seed}")
 
     try:
+        # Build extra inputs for text methods
+        extra_inputs = {}
+        if is_text_method:
+            extra_inputs["source_prompt"] = source_prompt
+            extra_inputs["edit_prompt"] = edit_prompt
+
         runner.run(
             source_image=source_image,
             edit_image=edit_image,
@@ -244,6 +266,7 @@ def run_method_class(
             source_features_path=case.source_model / "features.npz" if case.source_model else None,
             mask_glb_path=case.mask_glb,
             asset_dir=case.source_model or case.render_dir,
+            extra_inputs=extra_inputs,
         )
         print(f"✓ Method completed successfully")
         return 0

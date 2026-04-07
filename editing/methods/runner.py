@@ -30,8 +30,8 @@ class EditMethodRunner:
 
     def run(
         self,
-        source_image: Image.Image,
-        edit_image: Image.Image,
+        source_image: Image.Image | None,
+        edit_image: Image.Image | None,
         mask_image: Optional[Image.Image],
         config: EditMethodConfig,
         case_name: str,
@@ -42,12 +42,13 @@ class EditMethodRunner:
         source_features_path: Optional[Path] = None,
         mask_glb_path: Optional[Path] = None,
         asset_dir: Optional[Path] = None,
+        extra_inputs: Optional[Dict[str, Any]] = None,
     ) -> EditMethodOutputs:
         """Run the complete edit method pipeline.
 
         Args:
-            source_image: Source image
-            edit_image: Edit image
+            source_image: Source image (None for text methods)
+            edit_image: Edit image (None for text methods)
             mask_image: Optional mask image
             config: Method configuration
             case_name: Case name for output organization
@@ -58,6 +59,7 @@ class EditMethodRunner:
             source_features_path: Path to source features.npz (for RF inversion)
             mask_glb_path: Path to 3D mask GLB (for UniEdit)
             asset_dir: Asset directory (for RF inversion)
+            extra_inputs: Extra inputs (e.g., prompts for text methods)
 
         Returns:
             EditMethodOutputs with results
@@ -67,33 +69,47 @@ class EditMethodRunner:
         out_dir = ensure_dir(output_layout.edit_dir)
         source_out_dir = output_layout.source_original_dir
 
-        # Preprocess inputs
-        if mask_image is None:
-            from editing.preprocess import build_blank_mask
-            mask_image = build_blank_mask(source_image.size)
+        # Preprocess inputs (only for image methods)
+        if source_image is not None and edit_image is not None:
+            if mask_image is None:
+                from editing.preprocess import build_blank_mask
+                mask_image = build_blank_mask(source_image.size)
 
-        prepared = prepare_aligned_inputs(
-            source_image=source_image,
-            edit_image=edit_image,
-            mask_image=mask_image,
-            pipeline=self.pipeline,
-            preprocess=preprocess,
-            mask_threshold=mask_threshold,
-        )
+            prepared = prepare_aligned_inputs(
+                source_image=source_image,
+                edit_image=edit_image,
+                mask_image=mask_image,
+                pipeline=self.pipeline,
+                preprocess=preprocess,
+                mask_threshold=mask_threshold,
+            )
 
-        # Save preprocessing artifacts
-        save_preprocessed_inputs(out_dir, prepared, include_mask=True)
+            # Save preprocessing artifacts
+            save_preprocessed_inputs(out_dir, prepared, include_mask=True)
 
-        # Build method inputs
-        method_inputs = EditMethodInputs(
-            source_image=prepared.source,
-            edit_image=prepared.edit,
-            mask_image=prepared.mask,
-            source_voxels_path=source_voxels_path,
-            source_features_path=source_features_path,
-            mask_glb_path=mask_glb_path,
-            asset_dir=asset_dir,
-        )
+            # Build method inputs
+            method_inputs = EditMethodInputs(
+                source_image=prepared.source,
+                edit_image=prepared.edit,
+                mask_image=prepared.mask,
+                source_voxels_path=source_voxels_path,
+                source_features_path=source_features_path,
+                mask_glb_path=mask_glb_path,
+                asset_dir=asset_dir,
+                extra_inputs=extra_inputs or {},
+            )
+        else:
+            # Text method - no preprocessing needed
+            method_inputs = EditMethodInputs(
+                source_image=None,
+                edit_image=None,
+                mask_image=None,
+                source_voxels_path=source_voxels_path,
+                source_features_path=source_features_path,
+                mask_glb_path=mask_glb_path,
+                asset_dir=asset_dir,
+                extra_inputs=extra_inputs or {},
+            )
 
         # Save config
         config_dict = {
