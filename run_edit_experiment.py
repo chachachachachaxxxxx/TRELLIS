@@ -207,13 +207,25 @@ def run_method_class(
         source_prompt = None
         edit_prompt = None
 
-    # Parse extra args into config
+    # Get method default config
+    method = method_spec.create_method()
+    default_config = method.get_default_config()
+
+    # Parse extra args into config (merge with defaults)
     extra_params = {
         "skip_source": False,
-        "skip_render": skip_render,
-        "skip_glb": skip_glb,
-        "skip_ply": skip_ply,
     }
+
+    # Apply method defaults
+    extra_params.update(default_config)
+
+    # Override with CLI flags if explicitly set
+    if skip_render:
+        extra_params["skip_render"] = True
+    if skip_glb:
+        extra_params["skip_glb"] = True
+    if skip_ply:
+        extra_params["skip_ply"] = True
 
     # Parse extra args (simple key=value parsing)
     for arg in extra_args:
@@ -239,8 +251,7 @@ def run_method_class(
         extra_params=extra_params,
     )
 
-    # Create method and runner
-    method = method_spec.create_method()
+    # Use the already created method instance
     runner = EditMethodRunner(method, pipeline)
 
     # Run
