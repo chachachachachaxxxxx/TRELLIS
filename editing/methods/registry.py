@@ -133,6 +133,11 @@ try:
 except ImportError:
     ImageUniEditEulerMethod = None
 
+try:
+    from .image_p2p_latent_blend import ImageP2PLatentBlendMethod
+except ImportError:
+    ImageP2PLatentBlendMethod = None
+
 
 METHODS = {
     "image_prompt_to_prompt": MethodSpec(
@@ -210,6 +215,18 @@ METHODS = {
         ),
         requires_source_assets=True,
         method_class=ImageUniEditP2PHybridMethod,
+    ),
+    "image_p2p_latent_blend": MethodSpec(
+        name="image_p2p_latent_blend",
+        script_path=REPO_ROOT / "example_image_p2p_latent_blend.py",
+        description="P2P with post-generation latent blending on overlapping voxels. Supports hard/soft mask and two-stage control.",
+        required_fields=("source_image", "edit_image", "mask_image"),
+        path_args=(
+            ("source_image", "--source-image"),
+            ("edit_image", "--edit-image"),
+            ("mask_image", "--mask-image"),
+        ),
+        method_class=ImageP2PLatentBlendMethod,
     ),
     "image_uniedit_euler": MethodSpec(
         name="image_uniedit_euler",
