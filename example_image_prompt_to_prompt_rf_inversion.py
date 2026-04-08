@@ -30,7 +30,7 @@ Usage examples:
     --source-image assets/example_edit/2d_render.png
 
 python example_image_prompt_to_prompt_rf_inversion.py \
-  --input_model assets/example/model.glb \
+  --source-model assets/example/model.glb \
   --mask_glb assets/example/mask.glb \
   --render_dir outputs/rf_p2p/render \
   --image_dir outputs/rf_p2p/images \

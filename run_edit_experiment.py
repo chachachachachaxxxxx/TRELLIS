@@ -67,9 +67,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-render", action="store_true", help="Forward --skip-render to the method script.")
     parser.add_argument("--skip-glb", action="store_true", help="Forward --skip-glb to the method script.")
     parser.add_argument("--skip-ply", action="store_true", help="Forward --skip-ply to the method script.")
-    parser.add_argument("--source-model", default="", help="Override source RF asset directory or file.")
+    parser.add_argument("--asset-dir", default="", help="Override source asset directory (preprocessed 3D assets).")
     parser.add_argument("--render-dir", default="", help="Override render directory that contains voxels/features.")
-    parser.add_argument("--input-model", default="", help="Override compatibility input model path.")
+    parser.add_argument("--source-model", default="", help="Override source model path.")
     parser.add_argument("--source-image", default="", help="Override aligned source render image.")
     parser.add_argument("--edit-image", default="", help="Override edited target image.")
     parser.add_argument("--mask-image", default="", help="Override 2D edit mask.")
@@ -276,10 +276,10 @@ def run_method_class(
             config=config,
             case_name=effective_case_name,
             preprocess=effective_preprocess,
-            source_voxels_path=case.source_model / "voxels.ply" if case.source_model else None,
-            source_features_path=case.source_model / "features.npz" if case.source_model else None,
+            source_voxels_path=case.asset_dir / "voxels.ply" if case.asset_dir else None,
+            source_features_path=case.asset_dir / "features.npz" if case.asset_dir else None,
             mask_glb_path=case.mask_glb,
-            asset_dir=case.source_model or case.render_dir,
+            asset_dir=case.asset_dir,
             extra_inputs=extra_inputs,
         )
         print(f"✓ Method completed successfully")
@@ -316,9 +316,9 @@ def main() -> int:
         case,
         case_name=args.case_name,
         seed=args.seed,
-        source_model=args.source_model,
+        asset_dir=args.asset_dir,
         render_dir=args.render_dir,
-        input_model=args.input_model,
+        source_model=args.source_model,
         source_image=args.source_image,
         edit_image=args.edit_image,
         mask_image=args.mask_image,

@@ -94,15 +94,15 @@ def resolve_asset_dir(source_model: str) -> Path:
     If source_model is a file, returns its parent directory.
 
     Args:
-        source_model: Path to source model (file or directory)
+        source_model: Path to source 3D model (file or directory)
 
     Returns:
         Asset directory path
     """
-    source_path = ensure_path_exists(Path(source_model).expanduser().resolve(), "source-model")
-    if source_path.is_dir():
-        return source_path
-    return source_path.parent
+    model_path = ensure_path_exists(Path(source_model).expanduser().resolve(), "source-model")
+    if model_path.is_dir():
+        return model_path
+    return model_path.parent
 
 
 def resolve_source_image_path(asset_dir: Path, explicit_path: str) -> Path:

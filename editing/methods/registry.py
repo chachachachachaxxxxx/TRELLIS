@@ -33,9 +33,9 @@ class MethodSpec:
 
     def validate_case(self, case: EditingCase) -> None:
         if self.requires_source_assets:
-            if case.source_model is None and case.render_dir is None:
+            if case.asset_dir is None and case.render_dir is None:
                 raise RuntimeError(
-                    f"Method '{self.name}' requires either source_model or render_dir for "
+                    f"Method '{self.name}' requires either asset_dir or render_dir for "
                     f"{self.source_assets_description}."
                 )
 
@@ -84,8 +84,8 @@ class MethodSpec:
         if self.requires_source_assets:
             if case.render_dir is not None:
                 args.extend(["--render_dir", str(case.render_dir)])
-            elif case.source_model is not None:
-                args.extend(["--source-model", str(case.source_model)])
+            elif case.asset_dir is not None:
+                args.extend(["--asset-dir", str(case.asset_dir)])
 
         for field_name, flag in self.path_args:
             value = getattr(case, field_name)
@@ -169,7 +169,7 @@ METHODS = {
         description="RF inversion initialization plus image Prompt-to-Prompt cross-attention injection.",
         required_fields=("edit_image",),
         path_args=(
-            ("input_model", "--input_model"),
+            ("source_model", "--source_model"),
             ("source_image", "--source-image"),
             ("edit_image", "--edit-image"),
             ("mask_image", "--mask-image"),
@@ -183,7 +183,7 @@ METHODS = {
         description="RF inversion initialization plus UniEdit-style two-stage voxel editing.",
         required_fields=("edit_image", "mask_glb"),
         path_args=(
-            ("input_model", "--input_model"),
+            ("source_model", "--source_model"),
             ("source_image", "--source-image"),
             ("edit_image", "--edit-image"),
             ("mask_glb", "--mask_glb"),
@@ -207,7 +207,7 @@ METHODS = {
         description="Hybrid method combining UniEdit latent replacement with P2P attention injection during denoising.",
         required_fields=("edit_image", "mask_glb", "mask_image"),
         path_args=(
-            ("input_model", "--input_model"),
+            ("source_model", "--source_model"),
             ("source_image", "--source-image"),
             ("edit_image", "--edit-image"),
             ("mask_glb", "--mask_glb"),
@@ -218,14 +218,16 @@ METHODS = {
     ),
     "image_p2p_latent_blend": MethodSpec(
         name="image_p2p_latent_blend",
-        script_path=REPO_ROOT / "example_image_p2p_latent_blend.py",
-        description="P2P with post-generation latent blending on overlapping voxels. Supports hard/soft mask and two-stage control.",
+        script_path=REPO_ROOT / "example_image_p2p_latent_blend.py",  # Legacy script (not used)
+        description="P2P with per-step latent blending during denoising. Uses real source SLAT features.",
         required_fields=("source_image", "edit_image", "mask_image"),
         path_args=(
             ("source_image", "--source-image"),
             ("edit_image", "--edit-image"),
             ("mask_image", "--mask-image"),
         ),
+        requires_source_assets=True,  # Needs source SLAT features
+        source_assets_description="source SLAT features (features.npz)",
         method_class=ImageP2PLatentBlendMethod,
     ),
     "image_uniedit_euler": MethodSpec(
@@ -234,7 +236,7 @@ METHODS = {
         description="UniEdit with first-order Euler + predictor-corrector (simplified version without RF-Solver).",
         required_fields=("edit_image", "mask_glb"),
         path_args=(
-            ("input_model", "--input_model"),
+            ("source_model", "--source_model"),
             ("source_image", "--source-image"),
             ("edit_image", "--edit-image"),
             ("mask_glb", "--mask_glb"),

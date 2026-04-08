@@ -11,23 +11,23 @@ from pathlib import Path
 from editing.preprocess.source_assets import generate_source_assets_from_model
 
 # 配置
-input_model = Path("assets/edit_example/model.glb")
+source_model = Path("assets/edit_example/model.glb")
 output_dir = Path("outputs/source_assets_test0_multiview")
 
 print("=" * 60)
 print("使用多视角渲染生成 Source Assets")
 print("=" * 60)
-print(f"输入模型: {input_model}")
+print(f"源模型: {source_model}")
 print(f"输出目录: {output_dir}")
 print()
 
-if not input_model.exists():
-    print(f"❌ 输入模型不存在: {input_model}")
+if not source_model.exists():
+    print(f"❌ 源模型不存在: {source_model}")
     sys.exit(1)
 
 try:
     result = generate_source_assets_from_model(
-        model_path=input_model,
+        model_path=source_model,
         output_dir=output_dir,
         num_views=150,
         resolution=512,

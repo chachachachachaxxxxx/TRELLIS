@@ -64,9 +64,9 @@ class EditingCase:
     base_dir: Path
     case_dir: Path | None
     manifest_path: Path | None
-    source_model: Path | None
+    asset_dir: Path | None
     render_dir: Path | None
-    input_model: Path | None
+    source_model: Path | None
     source_image: Path | None
     edit_image: Path | None
     mask_image: Path | None
@@ -89,9 +89,9 @@ class EditingCase:
             "base_dir": str(self.base_dir),
             "case_dir": str(self.case_dir) if self.case_dir is not None else None,
             "manifest_path": str(self.manifest_path) if self.manifest_path is not None else None,
-            "source_model": str(self.source_model) if self.source_model is not None else None,
+            "asset_dir": str(self.asset_dir) if self.asset_dir is not None else None,
             "render_dir": str(self.render_dir) if self.render_dir is not None else None,
-            "input_model": str(self.input_model) if self.input_model is not None else None,
+            "source_model": str(self.source_model) if self.source_model is not None else None,
             "source_image": str(self.source_image) if self.source_image is not None else None,
             "edit_image": str(self.edit_image) if self.edit_image is not None else None,
             "mask_image": str(self.mask_image) if self.mask_image is not None else None,
@@ -158,16 +158,15 @@ def load_case(case_ref: str | Path | None = None) -> EditingCase:
     if edit_dir is None and allow_standard_layout:
         edit_dir = first_existing([base_dir / "edit"], kind="dir")
 
-    source_model = resolve_existing_path(
+    asset_dir = resolve_existing_path(
         base_dir,
-        source_section.get("source_model")
-        or source_section.get("asset_dir")
-        or raw_manifest.get("source_model"),
-        label="source_model",
+        source_section.get("asset_dir")
+        or raw_manifest.get("asset_dir"),
+        label="asset_dir",
     )
-    if source_model is None and _has_rf_assets(source_dir):
-        source_model = source_dir
-        inferred_fields.append("source_model")
+    if asset_dir is None and _has_rf_assets(source_dir):
+        asset_dir = source_dir
+        inferred_fields.append("asset_dir")
 
     render_dir = resolve_existing_path(
         base_dir,
@@ -179,16 +178,16 @@ def load_case(case_ref: str | Path | None = None) -> EditingCase:
         render_dir = source_dir
         inferred_fields.append("render_dir")
 
-    input_model = resolve_existing_path(
+    source_model = resolve_existing_path(
         base_dir,
-        source_section.get("input_model") or raw_manifest.get("input_model"),
-        label="input_model",
+        source_section.get("source_model") or raw_manifest.get("source_model"),
+        label="source_model",
         kind="file",
     )
-    if input_model is None:
-        input_model = first_existing(_candidate_paths(source_dir, INPUT_MODEL_CANDIDATES), kind="file")
-        if input_model is not None:
-            inferred_fields.append("input_model")
+    if source_model is None:
+        source_model = first_existing(_candidate_paths(source_dir, INPUT_MODEL_CANDIDATES), kind="file")
+        if source_model is not None:
+            inferred_fields.append("source_model")
 
     source_image = resolve_existing_path(
         base_dir,
@@ -263,9 +262,9 @@ def load_case(case_ref: str | Path | None = None) -> EditingCase:
         base_dir=base_dir,
         case_dir=case_dir,
         manifest_path=manifest_path,
-        source_model=source_model,
+        asset_dir=asset_dir,
         render_dir=render_dir,
-        input_model=input_model,
+        source_model=source_model,
         source_image=source_image,
         edit_image=edit_image,
         mask_image=mask_image,
@@ -285,9 +284,9 @@ def apply_case_overrides(
     *,
     case_name: str = "",
     seed: int | None = None,
-    source_model: str = "",
+    asset_dir: str = "",
     render_dir: str = "",
-    input_model: str = "",
+    source_model: str = "",
     source_image: str = "",
     edit_image: str = "",
     mask_image: str = "",
@@ -308,9 +307,9 @@ def apply_case_overrides(
         updates["edit_prompt"] = edit_prompt.strip()
 
     path_overrides = {
-        "source_model": (source_model, "source_model", "any"),
+        "asset_dir": (asset_dir, "asset_dir", "any"),
         "render_dir": (render_dir, "render_dir", "dir"),
-        "input_model": (input_model, "input_model", "file"),
+        "source_model": (source_model, "source_model", "file"),
         "source_image": (source_image, "source_image", "file"),
         "edit_image": (edit_image, "edit_image", "file"),
         "mask_image": (mask_image, "mask_image", "file"),
@@ -335,9 +334,9 @@ def summarize_case(case: EditingCase) -> dict[str, Any]:
         "case_name": case.case_name,
         "case_dir": display_path(case.case_dir, base),
         "manifest_path": display_path(case.manifest_path, base),
-        "source_model": display_path(case.source_model, base),
+        "asset_dir": display_path(case.asset_dir, base),
         "render_dir": display_path(case.render_dir, base),
-        "input_model": display_path(case.input_model, base),
+        "source_model": display_path(case.source_model, base),
         "source_image": display_path(case.source_image, base),
         "edit_image": display_path(case.edit_image, base),
         "mask_image": display_path(case.mask_image, base),

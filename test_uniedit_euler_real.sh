@@ -56,7 +56,7 @@ python run_edit_experiment.py \
   --source-image "$SOURCE_IMAGE" \
   --edit-image "$EDIT_IMAGE" \
   --mask-glb "$MASK_GLB" \
-  --input-model "$SOURCE_ASSETS" \
+  --source-model "$SOURCE_ASSETS" \
   --case-name "$CASE_NAME" \
   --seed "$SEED" \
   --skip-render \
