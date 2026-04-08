@@ -17,8 +17,32 @@ def get_slat_norm_tensors(pipeline, device: torch.device, dtype: torch.dtype) ->
     Returns:
         Tuple of (mean, std) tensors
     """
-    mean = pipeline.slat_normalization["mean"].to(device=device, dtype=dtype)
-    std = pipeline.slat_normalization["std"].to(device=device, dtype=dtype)
+    norm = pipeline.slat_normalization
+
+    # Handle different formats
+    if isinstance(norm, dict):
+        # Dict format: {"mean": tensor/list, "std": tensor/list}
+        mean_val = norm["mean"]
+        std_val = norm["std"]
+
+        # Convert to tensors if needed
+        if isinstance(mean_val, (list, tuple)):
+            mean = torch.tensor(mean_val, device=device, dtype=dtype)
+        else:
+            mean = mean_val.to(device=device, dtype=dtype)
+
+        if isinstance(std_val, (list, tuple)):
+            std = torch.tensor(std_val, device=device, dtype=dtype)
+        else:
+            std = std_val.to(device=device, dtype=dtype)
+
+    elif isinstance(norm, (list, tuple)):
+        # List format: [mean, std]
+        mean = torch.tensor(norm[0], device=device, dtype=dtype)
+        std = torch.tensor(norm[1], device=device, dtype=dtype)
+    else:
+        raise TypeError(f"Unexpected slat_normalization type: {type(norm)}")
+
     return mean, std
 
 
@@ -43,7 +67,7 @@ def invert_sparse_structure(
     Returns:
         Terminal noise tensor
     """
-    from trellis.pipelines.samplers import SecondOrderRFSampler
+    from editing.inversion.rf_sampler import SecondOrderRFSampler
 
     encoder = pipeline.models["sparse_structure_encoder"]
     flow_model = pipeline.models["sparse_structure_flow_model"]
@@ -83,7 +107,7 @@ def denoise_sparse_structure(
     Returns:
         Sparse structure coordinates
     """
-    from trellis.pipelines.samplers import SecondOrderRFSampler
+    from editing.inversion.rf_sampler import SecondOrderRFSampler
 
     flow_model = pipeline.models["sparse_structure_flow_model"]
     decoder = pipeline.models["sparse_structure_decoder"]
@@ -127,7 +151,7 @@ def invert_slat(
     Returns:
         Terminal noise tensor
     """
-    from trellis.pipelines.samplers import SecondOrderRFSampler
+    from editing.inversion.rf_sampler import SecondOrderRFSampler
 
     flow_model = pipeline.models["slat_flow_model"]
     mean, std = get_slat_norm_tensors(pipeline, slat_src.device, slat_src.feats.dtype)
@@ -167,7 +191,7 @@ def denoise_slat(
     Returns:
         Denoised SLAT tensor
     """
-    from trellis.pipelines.samplers import SecondOrderRFSampler
+    from editing.inversion.rf_sampler import SecondOrderRFSampler
 
     flow_model = pipeline.models["slat_flow_model"]
     sampler = SecondOrderRFSampler()
