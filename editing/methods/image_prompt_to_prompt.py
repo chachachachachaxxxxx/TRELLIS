@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List
 
+import numpy as np
 import torch
 from PIL import Image
 
@@ -162,6 +163,7 @@ class ImagePromptToPromptMethod(EditMethod):
         extra = config.extra_params or {}
         if not extra.get("skip_source", False):
             torch.manual_seed(config.seed)
+            np.random.seed(config.seed)
             source_coords = pipeline.sample_sparse_structure(
                 source_cond_dict,
                 num_samples=config.num_samples,
@@ -172,7 +174,7 @@ class ImagePromptToPromptMethod(EditMethod):
                 source_coords,
                 sampler_params=slat_params,
             )
-            source_outputs = pipeline.decode_slat(source_slat, ["mesh", "gaussian", "radiance_field"])
+            source_outputs = pipeline.decode_slat(source_slat, ["mesh", "gaussian"])
             del source_coords, source_slat
 
         # Patch models with hook
@@ -182,6 +184,7 @@ class ImagePromptToPromptMethod(EditMethod):
 
         # Run editing
         torch.manual_seed(config.seed)
+        np.random.seed(config.seed)
         coords = pipeline.sample_sparse_structure(
             edit_cond_dict,
             num_samples=config.num_samples,
@@ -192,7 +195,7 @@ class ImagePromptToPromptMethod(EditMethod):
             coords,
             sampler_params=slat_params,
         )
-        outputs = pipeline.decode_slat(slat, ["mesh", "gaussian", "radiance_field"])
+        outputs = pipeline.decode_slat(slat, ["mesh", "gaussian"])
 
         return EditMethodOutputs(
             outputs=outputs,

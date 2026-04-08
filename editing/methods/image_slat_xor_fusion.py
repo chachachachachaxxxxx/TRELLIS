@@ -186,6 +186,7 @@ class ImageSlatXorFusionMethod(EditMethod):
 
         # Generate target structure and SLAT
         torch.manual_seed(config.seed)
+        np.random.seed(config.seed)
         target_coords = pipeline.sample_sparse_structure(
             edit_cond_dict,
             num_samples=config.num_samples,
@@ -203,7 +204,7 @@ class ImageSlatXorFusionMethod(EditMethod):
         )
 
         # Decode fused SLAT
-        outputs = pipeline.decode_slat(fused_slat, ["mesh", "gaussian", "radiance_field"])
+        outputs = pipeline.decode_slat(fused_slat, ["mesh", "gaussian"])
 
         return EditMethodOutputs(
             outputs=outputs,

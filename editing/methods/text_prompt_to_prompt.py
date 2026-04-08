@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict
 
+import numpy as np
 import torch
 
 from editing.hooks import PromptToPromptHook, StageConfig
@@ -137,6 +138,7 @@ class TextPromptToPromptMethod(EditMethod):
         source_outputs = None
         if not extra.get("skip_source", False):
             torch.manual_seed(config.seed)
+            np.random.seed(config.seed)
             source_coords = pipeline.sample_sparse_structure(
                 source_cond_dict,
                 num_samples=config.num_samples,
@@ -163,6 +165,7 @@ class TextPromptToPromptMethod(EditMethod):
 
         # Run editing
         torch.manual_seed(config.seed)
+        np.random.seed(config.seed)
         coords = pipeline.sample_sparse_structure(
             edit_cond_dict,
             num_samples=config.num_samples,

@@ -165,6 +165,7 @@ class ImagePromptToPromptRFInversionMethod(EditMethod):
         # Convert coords to voxel tensor
         source_voxel = coords_to_voxel(source_coords, pipeline.device, resolution)
         torch.manual_seed(config.seed)
+        np.random.seed(config.seed)
         ss_terminal_noise = invert_sparse_structure(
             pipeline=pipeline,
             cond_src=source_cond_dict,
@@ -203,6 +204,7 @@ class ImagePromptToPromptRFInversionMethod(EditMethod):
 
         # Step 3: Denoise sparse structure with P2P
         torch.manual_seed(config.seed)
+        np.random.seed(config.seed)
         coords = denoise_sparse_structure(
             pipeline=pipeline,
             cond_edit=edit_cond_dict,
