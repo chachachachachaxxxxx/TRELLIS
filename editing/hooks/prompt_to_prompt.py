@@ -313,7 +313,7 @@ class PromptToPromptHook(AttentionHook):
         """Compute Prompt-to-Prompt attention for sparse tensors."""
         # Import SparseTensor here to avoid circular dependency
         try:
-            from trellis.representations import SparseTensor
+            from trellis.modules.sparse.basic import SparseTensor
         except ImportError:
             SparseTensor = type(q)
 

@@ -11,23 +11,26 @@ from PIL import Image
 from editing.common import save_outputs
 from editing.hooks import PromptToPromptHook, StageConfig
 from editing.methods.base import EditMethod, EditMethodConfig, EditMethodInputs, EditMethodOutputs
+from editing.preprocess.asset_3d import feats_to_slat
 from editing.utils import build_image_token_metadata, resolve_patch_size, save_mask_overlay_preview, save_patch_grid_preview
 
 
 class ImageP2PLatentBlendMethod(EditMethod):
     """Image P2P with post-generation latent blending.
 
-    Simple approach:
-    1. Generate source 3D with P2P
-    2. Generate edit 3D with P2P
-    3. Blend SLAT features based on mask (with optional soft blending)
+    Approach:
+    1. Load source 3D SLAT features (from preprocessed assets)
+    2. Generate edit 3D with P2P + per-step latent blending
+    3. Blend latents at each denoising step based on mask
 
-    This is simpler than UniEdit - no RF inversion, just blend final latents.
+    This is simpler than UniEdit - no RF inversion, just blend latents during generation.
+    Uses real source features instead of regenerating.
     """
 
     def __init__(self):
         super().__init__("image_p2p_latent_blend")
         self.hook: PromptToPromptHook | None = None
+        self.latent_blend_hook: LatentBlendHook | None = None
 
     def prepare(
         self,
@@ -45,6 +48,13 @@ class ImageP2PLatentBlendMethod(EditMethod):
         Returns:
             Dictionary with prepared state
         """
+        # Check that asset_dir is provided
+        if not inputs.asset_dir:
+            raise ValueError(
+                "image_p2p_latent_blend requires asset_dir (preprocessed 3D assets). "
+                "Use --source-model path/to/assets or preprocess with --preprocess."
+            )
+
         # Get extra params
         extra = config.extra_params or {}
         inject_stages = extra.get("inject_stages", ["sparse_structure", "slat"])
@@ -75,7 +85,17 @@ class ImageP2PLatentBlendMethod(EditMethod):
                 strength=strength,
             )
 
-        # Encode conditions
+        # Load source SLAT features from preprocessed assets
+        print("Loading source SLAT features from preprocessed assets...")
+        from trellis.modules.sparse.basic import SparseTensor
+        source_slat = feats_to_slat(
+            pipeline=pipeline,
+            feats_path=inputs.asset_dir / "features.npz",
+            SparseTensor=SparseTensor,
+        )
+        print(f"Loaded source SLAT: {source_slat.coords.shape[0]} voxels")
+
+        # Encode conditions (only need edit, not source)
         source_cond_dict = pipeline.get_cond([inputs.source_image])
         edit_cond_dict = pipeline.get_cond([inputs.edit_image])
 
@@ -121,6 +141,7 @@ class ImageP2PLatentBlendMethod(EditMethod):
         )
 
         return {
+            "source_slat": source_slat,
             "source_cond_dict": source_cond_dict,
             "edit_cond_dict": edit_cond_dict,
             "token_meta": token_meta,
@@ -187,12 +208,14 @@ class ImageP2PLatentBlendMethod(EditMethod):
         Returns:
             EditMethodOutputs with results
         """
+        source_slat = prepared_state["source_slat"]
         source_cond_dict = prepared_state["source_cond_dict"]
         edit_cond_dict = prepared_state["edit_cond_dict"]
         ss_spatial_mask = prepared_state["ss_spatial_mask"]
         slat_spatial_mask = prepared_state["slat_spatial_mask"]
         blend_ss_enabled = prepared_state["blend_ss_enabled"]
         blend_slat_enabled = prepared_state["blend_slat_enabled"]
+        blend_strength = prepared_state["blend_strength"]
         blend_strength = prepared_state["blend_strength"]
 
         # Get sampler params
@@ -204,23 +227,67 @@ class ImageP2PLatentBlendMethod(EditMethod):
             self.hook.patch_model(pipeline.models["sparse_structure_flow_model"], "sparse_structure")
             self.hook.patch_model(pipeline.models["slat_flow_model"], "slat")
 
-        # Step 1: Generate source 3D
-        print("Generating source 3D...")
-        torch.manual_seed(config.seed)
-        np.random.seed(config.seed)
-        source_coords = pipeline.sample_sparse_structure(
-            source_cond_dict,
-            num_samples=config.num_samples,
-            sampler_params=ss_params,
-        )
-        source_slat = pipeline.sample_slat(
-            source_cond_dict,
-            source_coords,
-            sampler_params=slat_params,
-        )
+        # Create and patch SS latent blend hook if enabled
+        self.ss_blend_hook = None
+        if blend_ss_enabled and ss_spatial_mask is not None:
+            print(f"Creating SS latent blend hook (strength={blend_strength})...")
+            resolution = pipeline.sparse_structure_sampler_params.get("grid_size", 64)
 
-        # Step 2: Generate edit 3D
-        print("Generating edit 3D...")
+            # Get blending time range from config
+            extra = config.extra_params or {}
+            ss_blend_t_start = extra.get("ss_blend_t_start", 1.0)
+            ss_blend_t_end = extra.get("ss_blend_t_end", 0.0)
+
+            # Generate source SS coords for blending
+            print("Generating source sparse structure for SS blending...")
+            torch.manual_seed(config.seed)
+            np.random.seed(config.seed)
+            source_coords = pipeline.sample_sparse_structure(
+                source_cond_dict,
+                num_samples=config.num_samples,
+                sampler_params=ss_params,
+            )
+
+            self.ss_blend_hook = LatentBlendHook(
+                source_slat=source_coords,  # Use coords as "slat" for SS stage
+                spatial_mask=ss_spatial_mask,
+                blend_strength=blend_strength,
+                resolution=resolution,
+                t_start=ss_blend_t_start,
+                t_end=ss_blend_t_end,
+            )
+            self.ss_blend_hook.patch_sampler(pipeline.sparse_structure_sampler)
+            print(f"SS latent blending enabled: t=[{ss_blend_t_start}, {ss_blend_t_end}]")
+
+        # Create and patch SLAT latent blend hook if enabled
+        self.latent_blend_hook = None
+        if blend_slat_enabled and slat_spatial_mask is not None:
+            print(f"Creating SLAT latent blend hook (strength={blend_strength})...")
+            resolution = pipeline.sparse_structure_sampler_params.get("grid_size", 64)
+
+            # Get blending time range from config
+            extra = config.extra_params or {}
+            blend_t_start = extra.get("blend_t_start", 1.0)
+            blend_t_end = extra.get("blend_t_end", 0.0)
+
+            self.latent_blend_hook = LatentBlendHook(
+                source_slat=source_slat,
+                spatial_mask=slat_spatial_mask,
+                blend_strength=blend_strength,
+                resolution=resolution,
+                t_start=blend_t_start,
+                t_end=blend_t_end,
+            )
+            self.latent_blend_hook.patch_sampler(pipeline.slat_sampler)
+            print(f"SLAT latent blending enabled: t=[{blend_t_start}, {blend_t_end}]")
+
+        # Step 1: Use loaded source SLAT (no generation needed)
+        print("Using loaded source SLAT features...")
+        source_coords = source_slat.coords
+        print(f"Source SLAT: {source_coords.shape[0]} voxels")
+
+        # Step 2: Generate edit 3D with P2P + latent blending
+        print("Generating edit 3D with P2P + per-step latent blending...")
         torch.manual_seed(config.seed)
         np.random.seed(config.seed)
         edit_coords = pipeline.sample_sparse_structure(
@@ -228,44 +295,40 @@ class ImageP2PLatentBlendMethod(EditMethod):
             num_samples=config.num_samples,
             sampler_params=ss_params,
         )
+
+        # Generate edit SLAT with latent blending hook active
         edit_slat = pipeline.sample_slat(
             edit_cond_dict,
             edit_coords,
             sampler_params=slat_params,
         )
 
-        # Step 3: Blend sparse structure if enabled
-        final_coords = edit_coords
-        if blend_ss_enabled and ss_spatial_mask is not None:
-            print(f"Blending sparse structure coordinates...")
-            # For coords, we can't really blend - just use edit coords
-            # The blending happens at the feature level (SLAT)
-            final_coords = edit_coords
-        else:
-            final_coords = edit_coords
-
-        # Step 4: Blend SLAT features if enabled
-        final_slat = edit_slat
-        if blend_slat_enabled and slat_spatial_mask is not None:
-            print(f"Blending SLAT features (strength={blend_strength})...")
-            resolution = pipeline.sparse_structure_sampler_params.get("grid_size", 64)
-            final_slat = self._blend_slat_features(
-                source_slat=source_slat,
-                edit_slat=edit_slat,
-                source_coords=source_coords,
-                edit_coords=edit_coords,
-                spatial_mask=slat_spatial_mask,
-                blend_strength=blend_strength,
-                resolution=resolution,
-                device=pipeline.device,
-            )
-        else:
-            print("SLAT blending disabled, using edit SLAT")
-            final_slat = edit_slat
-
-        # Step 5: Decode blended result
+        # Step 3: Decode result
         print("Decoding blended result...")
-        outputs = pipeline.decode_slat(final_slat, ["mesh", "gaussian"])
+        outputs = pipeline.decode_slat(edit_slat, ["mesh", "gaussian"])
+
+        # Print blending statistics
+        if self.ss_blend_hook:
+            stats = self.ss_blend_hook.stats
+            print(f"\n=== SS Voxel Overlap Statistics ===")
+            print(f"Source SS voxels: {stats['total_source_voxels']}")
+            print(f"Edit SS voxels (final): {stats['last_edit_voxels']}")
+            print(f"Overlapping voxels: {stats['last_overlap_count']}")
+            print(f"Overlap ratio (vs source): {stats['last_overlap_count'] / stats['total_source_voxels'] * 100:.2f}%")
+            print(f"Overlap ratio (vs edit): {stats['last_overlap_count'] / stats['last_edit_voxels'] * 100:.2f}%")
+            print(f"Edit-only voxels (newly generated): {stats['last_edit_voxels'] - stats['last_overlap_count']} ({(stats['last_edit_voxels'] - stats['last_overlap_count']) / stats['last_edit_voxels'] * 100:.2f}%)")
+            print(f"Blend calls: {stats['blend_calls']}")
+
+        if self.latent_blend_hook:
+            stats = self.latent_blend_hook.stats
+            print(f"\n=== SLAT Voxel Overlap Statistics ===")
+            print(f"Source SLAT voxels: {stats['total_source_voxels']}")
+            print(f"Edit SLAT voxels (final): {stats['last_edit_voxels']}")
+            print(f"Overlapping voxels: {stats['last_overlap_count']}")
+            print(f"Overlap ratio (vs source): {stats['last_overlap_count'] / stats['total_source_voxels'] * 100:.2f}%")
+            print(f"Overlap ratio (vs edit): {stats['last_overlap_count'] / stats['last_edit_voxels'] * 100:.2f}%")
+            print(f"Edit-only voxels (newly generated): {stats['last_edit_voxels'] - stats['last_overlap_count']} ({(stats['last_edit_voxels'] - stats['last_overlap_count']) / stats['last_edit_voxels'] * 100:.2f}%)")
+            print(f"Blend calls: {stats['blend_calls']}")
 
         # Also decode source for comparison
         source_outputs = pipeline.decode_slat(source_slat, ["mesh", "gaussian"])
@@ -275,126 +338,6 @@ class ImageP2PLatentBlendMethod(EditMethod):
             source_outputs=source_outputs,
             metadata=prepared_state["token_meta"],
         )
-
-    def _blend_slat_features(
-        self,
-        source_slat,
-        edit_slat,
-        source_coords,
-        edit_coords,
-        spatial_mask: torch.Tensor,
-        blend_strength: float,
-        resolution: int,
-        device: torch.device,
-    ):
-        """Blend SLAT features based on spatial mask at overlapping voxels.
-
-        Key idea: For voxels that exist in both source and edit,
-        blend their features based on the mask value at that spatial location.
-
-        Args:
-            source_slat: Source SLAT (SparseTensor)
-            edit_slat: Edit SLAT (SparseTensor)
-            source_coords: Source coordinates [N_src, 4] (batch, x, y, z)
-            edit_coords: Edit coordinates [N_edit, 4] (batch, x, y, z)
-            spatial_mask: 2D spatial mask [1, 1, H, W], 0=preserve source, 1=use edit
-            blend_strength: Blending strength (0-1)
-            resolution: Voxel grid resolution
-            device: Device
-
-        Returns:
-            Blended SLAT (SparseTensor)
-        """
-        # Check if SparseTensor
-        if not (hasattr(source_slat, 'coords') and hasattr(source_slat, 'feats')):
-            print("Warning: source_slat is not a SparseTensor, returning edit_slat")
-            return edit_slat
-
-        if not (hasattr(edit_slat, 'coords') and hasattr(edit_slat, 'feats')):
-            print("Warning: edit_slat is not a SparseTensor, returning edit_slat")
-            return edit_slat
-
-        # Get coordinates and features
-        src_coords = source_slat.coords  # [N_src, 4]
-        src_feats = source_slat.feats    # [N_src, C]
-        edit_coords = edit_slat.coords   # [N_edit, 4]
-        edit_feats = edit_slat.feats     # [N_edit, C]
-
-        # Find overlapping voxels
-        # Convert coords to hashable format for matching
-        src_coords_3d = src_coords[:, 1:].cpu()  # [N_src, 3] (x, y, z)
-        edit_coords_3d = edit_coords[:, 1:].cpu()  # [N_edit, 3] (x, y, z)
-
-        # Create coordinate hash for fast lookup
-        def coords_to_hash(coords_3d):
-            """Convert 3D coords to hash strings."""
-            return [f"{int(x)}_{int(y)}_{int(z)}" for x, y, z in coords_3d.tolist()]
-
-        src_hash = coords_to_hash(src_coords_3d)
-        edit_hash = coords_to_hash(edit_coords_3d)
-
-        # Build hash to index mapping
-        src_hash_to_idx = {h: i for i, h in enumerate(src_hash)}
-        edit_hash_to_idx = {h: i for i, h in enumerate(edit_hash)}
-
-        # Find overlapping voxels
-        overlap_hashes = set(src_hash) & set(edit_hash)
-        print(f"Found {len(overlap_hashes)} overlapping voxels out of {len(src_hash)} source and {len(edit_hash)} edit voxels")
-
-        if len(overlap_hashes) == 0:
-            print("No overlapping voxels, returning edit_slat")
-            return edit_slat
-
-        # For each overlapping voxel, compute blend weight from mask
-        blended_feats = edit_feats.clone()
-
-        # Get mask resolution
-        mask_h, mask_w = spatial_mask.shape[2], spatial_mask.shape[3]
-
-        for hash_str in overlap_hashes:
-            src_idx = src_hash_to_idx[hash_str]
-            edit_idx = edit_hash_to_idx[hash_str]
-
-            # Get 3D coordinate
-            x, y, z = src_coords_3d[src_idx]
-
-            # Project 3D coordinate to 2D mask space
-            # Assume z is depth, project (x, y) to mask
-            # Normalize to [0, 1] range (assuming coords are in [0, resolution])
-            # This is a simplified projection - proper implementation would need camera parameters
-            resolution = 64  # Default resolution, should be passed as parameter
-
-            # Simple top-down projection: (x, y) -> (u, v)
-            u = int((x / resolution) * mask_w)
-            v = int((y / resolution) * mask_h)
-            u = max(0, min(mask_w - 1, u))
-            v = max(0, min(mask_h - 1, v))
-
-            # Get mask value at this location
-            mask_value = spatial_mask[0, 0, v, u].item()  # 0 = preserve source, 1 = use edit
-
-            # Blend features: blend_weight controls how much to use source
-            # mask_value = 0 -> use source (blend_weight = 1)
-            # mask_value = 1 -> use edit (blend_weight = 0)
-            blend_weight = (1.0 - mask_value) * blend_strength
-
-            # Blend: result = blend_weight * source + (1 - blend_weight) * edit
-            src_feat = src_feats[src_idx]
-            edit_feat = edit_feats[edit_idx]
-            blended_feat = blend_weight * src_feat + (1.0 - blend_weight) * edit_feat
-
-            # Update edit features
-            blended_feats[edit_idx] = blended_feat
-
-        # Create blended SLAT with edit coords and blended features
-        from trellis.modules import sparse as sp
-        blended_slat = sp.SparseTensor(
-            feats=blended_feats,
-            coords=edit_coords,
-        )
-
-        print(f"Blended {len(overlap_hashes)} voxel features (strength={blend_strength})")
-        return blended_slat
 
     def save_artifacts(
         self,
@@ -462,6 +405,9 @@ class ImageP2PLatentBlendMethod(EditMethod):
         if self.hook:
             self.hook.restore()
             self.hook = None
+        if self.latent_blend_hook:
+            self.latent_blend_hook.restore()
+            self.latent_blend_hook = None
 
     def get_default_config(self) -> Dict:
         """Get default configuration."""
@@ -477,15 +423,188 @@ class ImageP2PLatentBlendMethod(EditMethod):
             "patch_coverage_threshold": 0.0,
             "query_chunk": 1024,
             # Latent blending params - two stages independently controlled
-            "blend_ss_enabled": False,  # Sparse structure blending (usually not needed)
+            "blend_ss_enabled": True,  # Sparse structure blending (critical for coord alignment!)
             "blend_slat_enabled": True,  # SLAT blending (main feature)
             "ss_blend_mode": "hard",  # "hard" or "soft" for sparse structure
-            "slat_blend_mode": "soft",  # "hard" or "soft" for SLAT
+            "slat_blend_mode": "hard",  # "hard" or "soft" for SLAT
             "ss_soft_kernel_size": 3,  # Kernel size for SS soft mask
             "slat_soft_kernel_size": 5,  # Kernel size for SLAT soft mask
             "blend_strength": 1.0,  # Overall blending strength
+            "ss_blend_t_start": 1.0,  # Start timestep for SS blending
+            "ss_blend_t_end": 0.0,  # End timestep for SS blending
+            "blend_t_start": 1.0,  # Start timestep for SLAT blending (1.0 = beginning)
+            "blend_t_end": 0.5,  # End timestep for SLAT blending (0.0 = end, full range)
             # Output params
             "skip_render": True,
             "skip_glb": False,
             "skip_ply": False,
         }
+
+
+class LatentBlendHook:
+    """Hook for blending latents during denoising process.
+
+    This hook intercepts the denoising steps and blends the current latent
+    with a reference latent (source) based on a spatial mask.
+    """
+
+    def __init__(
+        self,
+        source_slat,
+        spatial_mask: torch.Tensor,
+        blend_strength: float,
+        resolution: int,
+        t_start: float = 1.0,
+        t_end: float = 0.0,
+    ):
+        """Initialize latent blend hook.
+
+        Args:
+            source_slat: Source SLAT features (SparseTensor)
+            spatial_mask: 2D spatial mask [1, 1, H, W], 0=preserve source, 1=use edit
+            blend_strength: Blending strength (0-1)
+            resolution: Voxel grid resolution
+            t_start: Start timestep for blending (normalized 0-1)
+            t_end: End timestep for blending (normalized 0-1)
+        """
+        self.source_slat = source_slat
+        self.spatial_mask = spatial_mask
+        self.blend_strength = blend_strength
+        self.resolution = resolution
+        self.t_start = t_start
+        self.t_end = t_end
+
+        # Build coordinate hash for fast lookup
+        self.src_coords_3d = source_slat.coords[:, 1:].cpu()  # [N_src, 3]
+        self.src_hash_to_idx = self._build_coord_hash(self.src_coords_3d)
+        self.src_feats = source_slat.feats
+
+        # Statistics tracking
+        self.stats = {
+            "total_source_voxels": len(self.src_coords_3d),
+            "blend_calls": 0,
+            "last_overlap_count": 0,
+            "last_edit_voxels": 0,
+        }
+
+        # Cache mask resolution
+        self.mask_h = spatial_mask.shape[2]
+        self.mask_w = spatial_mask.shape[3]
+
+        self._original_sample_once = None
+
+    def _build_coord_hash(self, coords_3d):
+        """Build hash map from 3D coords to indices."""
+        hash_to_idx = {}
+        for i, (x, y, z) in enumerate(coords_3d.tolist()):
+            hash_str = f"{int(x)}_{int(y)}_{int(z)}"
+            hash_to_idx[hash_str] = i
+        return hash_to_idx
+
+    def should_blend(self, t_norm: float) -> bool:
+        """Check if blending should be applied at this timestep."""
+        lo = min(self.t_start, self.t_end)
+        hi = max(self.t_start, self.t_end)
+        return lo <= t_norm <= hi
+
+    def blend_latent(self, latent, t_norm: float):
+        """Blend latent with source based on mask.
+
+        Args:
+            latent: Current latent (SparseTensor)
+            t_norm: Normalized timestep (0-1)
+
+        Returns:
+            Blended latent (SparseTensor)
+        """
+        if not self.should_blend(t_norm):
+            return latent
+
+        # Get edit coordinates and features
+        edit_coords_3d = latent.coords[:, 1:].cpu()  # [N_edit, 3]
+        edit_feats = latent.feats
+
+        # Build edit hash
+        edit_hash_to_idx = self._build_coord_hash(edit_coords_3d)
+
+        # Find overlapping voxels
+        overlap_hashes = set(self.src_hash_to_idx.keys()) & set(edit_hash_to_idx.keys())
+
+        # Update statistics
+        self.stats["blend_calls"] += 1
+        self.stats["last_overlap_count"] = len(overlap_hashes)
+        self.stats["last_edit_voxels"] = len(edit_coords_3d)
+
+        if len(overlap_hashes) == 0:
+            return latent
+
+        # Blend features
+        blended_feats = edit_feats.clone()
+
+        for hash_str in overlap_hashes:
+            src_idx = self.src_hash_to_idx[hash_str]
+            edit_idx = edit_hash_to_idx[hash_str]
+
+            # Get 3D coordinate
+            x, y, _z = self.src_coords_3d[src_idx]
+
+            # Project to 2D mask space (simple top-down projection)
+            u = int((x / self.resolution) * self.mask_w)
+            v = int((y / self.resolution) * self.mask_h)
+            u = max(0, min(self.mask_w - 1, u))
+            v = max(0, min(self.mask_h - 1, v))
+
+            # Get mask value
+            mask_value = self.spatial_mask[0, 0, v, u].item()
+
+            # Compute blend weight: mask_value=0 -> use source, mask_value=1 -> use edit
+            blend_weight = (1.0 - mask_value) * self.blend_strength
+
+            # Blend features
+            src_feat = self.src_feats[src_idx]
+            edit_feat = edit_feats[edit_idx]
+            blended_feat = blend_weight * src_feat + (1.0 - blend_weight) * edit_feat
+
+            blended_feats[edit_idx] = blended_feat
+
+        # Create blended latent
+        from trellis.modules import sparse as sp
+        blended_latent = sp.SparseTensor(
+            feats=blended_feats,
+            coords=latent.coords,
+        )
+
+        return blended_latent
+
+    def patch_sampler(self, sampler):
+        """Patch sampler to inject latent blending."""
+        import types
+
+        original_sample_once = sampler.sample_once
+        self._original_sample_once = original_sample_once
+        hook = self
+
+        def wrapped_sample_once(_sampler_self, model, x_t, t, t_prev, cond=None, **kwargs):
+            # Call original sample_once
+            result = original_sample_once(model, x_t, t, t_prev, cond, **kwargs)
+
+            # Get timestep value (t is already a float in sample_once)
+            t_norm = float(t)
+
+            # Blend the pred_x_prev result
+            if hasattr(result, 'pred_x_prev'):
+                pred_x_prev = result.pred_x_prev
+                if hasattr(pred_x_prev, 'feats') and hasattr(pred_x_prev, 'coords'):
+                    blended = hook.blend_latent(pred_x_prev, t_norm)
+                    result.pred_x_prev = blended
+
+            return result
+
+        sampler.sample_once = types.MethodType(wrapped_sample_once, sampler)
+
+    def restore(self):
+        """Restore original sampler."""
+        # Note: This is tricky because we need to keep a reference to the sampler
+        # For now, we'll just set the hook to None
+        pass
+
