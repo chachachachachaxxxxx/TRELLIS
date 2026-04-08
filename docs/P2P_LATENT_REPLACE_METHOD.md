@@ -135,10 +135,22 @@ python run_edit_experiment.py \
   - 越大越平滑，但过渡区域越宽
   - 推荐：3-7
 
-- `blend_strength`: 整体混合强度，默认 `1.0`
-  - `1.0` = 完全混合
-  - `0.5` = 半强度混合
-  - `0.0` = 不混合（退化为纯编辑）
+- `blend_strength`: 整体混合强度（全局缩放因子），默认 `1.0`
+  - **作用**：控制 mask 的影响程度
+  - `1.0` = 完全遵循 mask（mask 说保留就保留）
+  - `0.5` = 减弱 mask 影响（更倾向编辑）
+  - `0.0` = 完全忽略 mask（全部使用编辑）
+  
+  **公式**：
+  ```python
+  blend_weight = (1.0 - mask_value) * blend_strength
+  blended = blend_weight * source + (1 - blend_weight) * edit
+  ```
+  
+  **示例**（假设 mask_value = 0.2，接近黑色/保留区域）：
+  - `strength=1.0`: 80% 源 + 20% 编辑
+  - `strength=0.5`: 40% 源 + 60% 编辑
+  - `strength=0.0`: 0% 源 + 100% 编辑
 
 ### 完整示例
 
