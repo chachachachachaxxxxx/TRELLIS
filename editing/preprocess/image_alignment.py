@@ -52,7 +52,7 @@ def scale_image(image: Image.Image, scale: float, resample) -> Image.Image:
     return image.resize((new_w, new_h), resample)
 
 
-def composite_rgb_from_rgba(image: Image.Image, background: str = "white") -> Image.Image:
+def composite_rgb_from_rgba(image: Image.Image, background: str = "black") -> Image.Image:
     """Composite RGBA image onto a solid background.
 
     Args:
