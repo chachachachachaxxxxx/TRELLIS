@@ -19,7 +19,6 @@ echo "=========================================="
 
 python run_edit_experiment.py \
   --method image_p2p_latent_blend \
-  --attn-backend xformers \
   --source-image assets/edit_example/images/2d_render.png \
   --edit-image assets/edit_example/images/2d_edit.png \
   --mask-image assets/edit_example/images/2d_mask.png \
