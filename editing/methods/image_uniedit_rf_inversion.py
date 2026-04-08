@@ -279,11 +279,17 @@ class ImageUniEditRFInversionMethod(EditMethod):
         # Decode
         print("Decoding final result...")
         extra = config.extra_params or {}
-        decode_modes = extra.get("decode_modes", ["mesh"])
+        decode_modes = extra.get("decode_modes", ["mesh", "gaussian"])
 
-        # Handle string input (e.g., "gaussian,mesh" from CLI)
+        # Handle string input (e.g., "gaussian,mesh" from CLI or "[\"mesh\"]" from shell)
         if isinstance(decode_modes, str):
-            decode_modes = [m.strip() for m in decode_modes.split(",")]
+            # Try to parse JSON-like string first
+            import json
+            try:
+                decode_modes = json.loads(decode_modes)
+            except (json.JSONDecodeError, ValueError):
+                # Fall back to comma-separated parsing
+                decode_modes = [m.strip() for m in decode_modes.split(",")]
 
         print(f"Decode modes: {decode_modes}")
         outputs = pipeline.decode_slat(slat_tgt, decode_modes)
