@@ -144,6 +144,10 @@ class EditMethodRunner:
             # Run method
             outputs = self.method.run(self.pipeline, prepared_state, config)
 
+            # Offload pipeline models to CPU before GLB export to free GPU memory
+            from editing.common.save_utils import offload_models_to_cpu
+            offload_models_to_cpu(self.pipeline)
+
             # Save artifacts
             artifact_paths = self.method.save_artifacts(outputs, out_dir, config)
 

@@ -36,6 +36,20 @@ def release_cuda_memory() -> None:
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
+
+def offload_models_to_cpu(pipeline) -> None:
+    """Offload pipeline models to CPU to free GPU memory before GLB export.
+
+    Args:
+        pipeline: The pipeline object with models dict
+    """
+    if hasattr(pipeline, 'models'):
+        for model in pipeline.models.values():
+            if hasattr(model, 'cpu'):
+                model.cpu()
+    release_cuda_memory()
 
 
 def save_preview_video(render_utils, imageio, sample, out_path: Path, channel: str, label: str) -> bool:
