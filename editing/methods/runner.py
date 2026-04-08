@@ -69,8 +69,13 @@ class EditMethodRunner:
         out_dir = ensure_dir(output_layout.edit_dir)
         source_out_dir = output_layout.source_original_dir
 
-        # Preprocess inputs (only for image methods)
-        if source_image is not None and edit_image is not None:
+        # Preprocess inputs (only for image methods with edit_image)
+        if edit_image is not None:
+            # Some methods (like fusion) don't need source_image
+            if source_image is None:
+                # Use edit_image as both source and edit for preprocessing
+                source_image = edit_image
+
             if mask_image is None:
                 from editing.preprocess import build_blank_mask
                 mask_image = build_blank_mask(source_image.size)
@@ -89,7 +94,7 @@ class EditMethodRunner:
 
             # Build method inputs
             method_inputs = EditMethodInputs(
-                source_image=prepared.source,
+                source_image=prepared.source if source_image != edit_image else None,
                 edit_image=prepared.edit,
                 mask_image=prepared.mask,
                 source_voxels_path=source_voxels_path,

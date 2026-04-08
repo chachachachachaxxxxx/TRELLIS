@@ -7,6 +7,7 @@ import numpy as np
 import torch
 
 from editing.methods.base import EditMethod, EditMethodConfig, EditMethodInputs, EditMethodOutputs
+from editing.preprocess.asset_3d import feats_to_slat
 
 
 def coords3d(coords: torch.Tensor) -> torch.Tensor:
@@ -149,8 +150,8 @@ class ImageSlatXorFusionMethod(EditMethod):
             raise RuntimeError(f"features.npz not found in {inputs.asset_dir}")
 
         # Load features
-        features_data = np.load(features_path)
-        source_slat = pipeline.unpack_slat_from_npz(features_data)
+        from trellis.modules import sparse as sp
+        source_slat = feats_to_slat(pipeline, features_path, sp.SparseTensor)
 
         # Encode edit condition
         edit_cond_dict = pipeline.get_cond([inputs.edit_image])

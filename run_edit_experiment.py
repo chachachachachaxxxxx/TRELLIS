@@ -202,8 +202,11 @@ def run_method_class(
         source_image = Image.open(case.source_image) if case.source_image else None
         edit_image = Image.open(case.edit_image) if case.edit_image else None
         mask_image = Image.open(case.mask_image) if case.mask_image else None
-        if source_image is None or edit_image is None:
-            raise RuntimeError("Image method requires source_image and edit_image")
+        # Some methods (like fusion) don't require source_image
+        if edit_image is None:
+            raise RuntimeError("Image method requires at least edit_image")
+        if source_image is None and method_spec.name not in ["image_slat_xor_fusion"]:
+            raise RuntimeError(f"Method {method_spec.name} requires source_image")
         source_prompt = None
         edit_prompt = None
 
