@@ -289,7 +289,7 @@ def load_mask_glb_coords(
     if mesh is None:
         return MaskGLBResult(coords=None, mesh=None, meta=meta)
 
-    from voxhammer.util_voxel_filtering import process_voxels_with_improved_filtering
+    from editing.preprocess.voxel_filtering import process_voxels_with_improved_filtering
 
     preset_voxel_path = "assets/preset/preset_grid64.ply"
     voxel_size = 1.0 / float(resolution)

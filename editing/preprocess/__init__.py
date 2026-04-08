@@ -28,6 +28,11 @@ from .image_alignment import (
     scale_image,
 )
 from .mask_utils import build_auto_mask, build_blank_mask, binarize_mask_image, extract_mask_channel
+from .source_assets import (
+    ensure_source_assets,
+    generate_source_assets_from_image,
+    generate_source_assets_from_model,
+)
 
 __all__ = [
     "MaskGLBResult",
@@ -43,9 +48,12 @@ __all__ = [
     "composite_rgb_from_rgba",
     "coords_to_flat_indices",
     "coords_to_voxel",
+    "ensure_source_assets",
     "extract_foreground_rgba",
     "extract_mask_channel",
     "feats_to_slat",
+    "generate_source_assets_from_image",
+    "generate_source_assets_from_model",
     "has_useful_alpha",
     "load_mask_glb_coords",
     "load_ply_positions",

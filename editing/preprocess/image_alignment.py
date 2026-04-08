@@ -52,10 +52,30 @@ def scale_image(image: Image.Image, scale: float, resample) -> Image.Image:
     return image.resize((new_w, new_h), resample)
 
 
-def composite_rgb_from_rgba(image: Image.Image) -> Image.Image:
+def composite_rgb_from_rgba(image: Image.Image, background: str = "white") -> Image.Image:
+    """Composite RGBA image onto a solid background.
+
+    Args:
+        image: RGBA image
+        background: "white" or "black" background color
+
+    Returns:
+        RGB image with alpha composited
+    """
     rgba = np.asarray(image.convert("RGBA")).astype(np.float32) / 255.0
-    rgb = rgba[:, :, :3] * rgba[:, :, 3:4]
-    return Image.fromarray((rgb * 255).astype(np.uint8), mode="RGB")
+    rgb = rgba[:, :, :3]
+    alpha = rgba[:, :, 3:4]
+
+    # Composite onto background: result = foreground * alpha + background * (1 - alpha)
+    if background == "white":
+        bg_color = 1.0
+    elif background == "black":
+        bg_color = 0.0
+    else:
+        raise ValueError(f"background must be 'white' or 'black', got {background}")
+
+    composited = rgb * alpha + bg_color * (1.0 - alpha)
+    return Image.fromarray((composited * 255).astype(np.uint8), mode="RGB")
 
 
 def extract_foreground_rgba(

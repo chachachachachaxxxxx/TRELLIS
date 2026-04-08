@@ -120,6 +120,9 @@ def save_outputs(
             num_samples = max(num_samples, len(outputs[key]))
     num_samples = max(num_samples, 1)
 
+    print(f"Saving outputs: {list(outputs.keys())}, num_samples={num_samples}")
+    print(f"skip_glb={skip_glb}, skip_ply={skip_ply}, skip_render={skip_render}")
+
     for sample_idx in range(num_samples):
         prefix = f"sample_{sample_idx:02d}"
 
@@ -153,6 +156,7 @@ def save_outputs(
                 )
 
         if not skip_glb and "gaussian" in outputs and "mesh" in outputs:
+            print(f"Exporting GLB for sample {sample_idx}...")
             release_cuda_memory()
             glb = postprocessing_utils.to_glb(
                 outputs["gaussian"][sample_idx],
@@ -160,10 +164,15 @@ def save_outputs(
                 simplify=0.95,
                 texture_size=1024,
             )
-            glb.export(str(out_dir / f"{prefix}.glb"))
+            glb_path = out_dir / f"{prefix}.glb"
+            glb.export(str(glb_path))
+            print(f"✓ Saved GLB: {glb_path}")
             del glb
             release_cuda_memory()
 
         if not skip_ply and "gaussian" in outputs:
+            print(f"Exporting PLY for sample {sample_idx}...")
             release_cuda_memory()
-            outputs["gaussian"][sample_idx].save_ply(str(out_dir / f"{prefix}.ply"))
+            ply_path = out_dir / f"{prefix}.ply"
+            outputs["gaussian"][sample_idx].save_ply(str(ply_path))
+            print(f"✓ Saved PLY: {ply_path}")

@@ -281,6 +281,11 @@ class ImageUniEditRFInversionMethod(EditMethod):
         extra = config.extra_params or {}
         decode_modes = extra.get("decode_modes", ["mesh"])
 
+        # Handle string input (e.g., "gaussian,mesh" from CLI)
+        if isinstance(decode_modes, str):
+            decode_modes = [m.strip() for m in decode_modes.split(",")]
+
+        print(f"Decode modes: {decode_modes}")
         outputs = pipeline.decode_slat(slat_tgt, decode_modes)
 
         return EditMethodOutputs(
@@ -489,5 +494,5 @@ class ImageUniEditRFInversionMethod(EditMethod):
             "slat_omega": 1.0,
             "cfg_interval": (0.5, 1.0),
             "stage2_variant": "preserve_uniedit",  # or "free_target", "latent_replace_union"
-            "decode_modes": ["mesh"],
+            "decode_modes": ["gaussian", "mesh"],  # Need both for GLB/PLY export
         }
