@@ -123,6 +123,11 @@ try:
 except ImportError:
     ImageUniEditRFInversionMethod = None
 
+try:
+    from .image_uniedit_p2p_hybrid import ImageUniEditP2PHybridMethod
+except ImportError:
+    ImageUniEditP2PHybridMethod = None
+
 
 METHODS = {
     "image_prompt_to_prompt": MethodSpec(
@@ -185,6 +190,21 @@ METHODS = {
         requires_source_assets=True,
         source_assets_description="source SLAT assets",
         method_class=ImageSlatXorFusionMethod,
+    ),
+    "image_uniedit_p2p_hybrid": MethodSpec(
+        name="image_uniedit_p2p_hybrid",
+        script_path=REPO_ROOT / "example_image_uniedit_p2p_hybrid.py",
+        description="Hybrid method combining UniEdit latent replacement with P2P attention injection during denoising.",
+        required_fields=("edit_image", "mask_glb", "mask_image"),
+        path_args=(
+            ("input_model", "--input_model"),
+            ("source_image", "--source-image"),
+            ("edit_image", "--edit-image"),
+            ("mask_glb", "--mask_glb"),
+            ("mask_image", "--mask-image"),
+        ),
+        requires_source_assets=True,
+        method_class=ImageUniEditP2PHybridMethod,
     ),
 }
 
