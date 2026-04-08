@@ -120,6 +120,8 @@ class TextPromptToPromptMethod(EditMethod):
         Returns:
             EditMethodOutputs with results
         """
+        import gc
+
         source_cond_dict = prepared_state["source_cond_dict"]
         edit_cond_dict = prepared_state["edit_cond_dict"]
 
@@ -127,9 +129,12 @@ class TextPromptToPromptMethod(EditMethod):
         ss_params = config.sparse_structure_sampler_params or {}
         slat_params = config.slat_sampler_params or {}
 
+        # Get decode formats (default to mesh only for memory efficiency)
+        extra = config.extra_params or {}
+        decode_formats = extra.get("decode_formats", ["mesh"])
+
         # Run source reconstruction if needed
         source_outputs = None
-        extra = config.extra_params or {}
         if not extra.get("skip_source", False):
             torch.manual_seed(config.seed)
             source_coords = pipeline.sample_sparse_structure(
@@ -142,8 +147,14 @@ class TextPromptToPromptMethod(EditMethod):
                 source_coords,
                 sampler_params=slat_params,
             )
-            source_outputs = pipeline.decode_slat(source_slat, ["mesh", "gaussian", "radiance_field"])
+            # Decode with memory-efficient format list
+            source_outputs = pipeline.decode_slat(source_slat, decode_formats)
+
+            # Clean up intermediate tensors
             del source_coords, source_slat
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         # Patch models with hook
         if self.hook:
@@ -157,12 +168,26 @@ class TextPromptToPromptMethod(EditMethod):
             num_samples=config.num_samples,
             sampler_params=ss_params,
         )
+
+        # Clean up after sparse structure sampling
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         slat = pipeline.sample_slat(
             edit_cond_dict,
             coords,
             sampler_params=slat_params,
         )
-        outputs = pipeline.decode_slat(slat, ["mesh", "gaussian", "radiance_field"])
+
+        # Clean up coords before decode
+        del coords
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        # Decode with memory-efficient format list
+        outputs = pipeline.decode_slat(slat, decode_formats)
 
         return EditMethodOutputs(
             outputs=outputs,
@@ -232,4 +257,5 @@ class TextPromptToPromptMethod(EditMethod):
             "skip_render": True,  # Skip video rendering by default
             "skip_glb": False,
             "skip_ply": False,
+            "decode_formats": ["mesh", "gaussian"],  # Decode mesh and gaussian (skip radiance_field to save memory)
         }
