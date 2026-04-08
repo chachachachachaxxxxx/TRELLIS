@@ -5,6 +5,10 @@
 
 set -e
 
+# 激活 hammer 环境
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate hammer
+
 CASE_NAME="p2p_blend_quick_test"
 SEED=1
 GPU=3
@@ -25,8 +29,8 @@ python run_edit_experiment.py \
   --case-name "$CASE_NAME" \
   --seed $SEED \
   --preprocess \
-  --ss-steps 12 \
-  --slat-steps 12 \
+  --ss-steps 25 \
+  --slat-steps 25 \
   --extra-param blend_slat_enabled=true \
   --extra-param slat_blend_mode=soft \
   --extra-param slat_soft_kernel_size=5 \
