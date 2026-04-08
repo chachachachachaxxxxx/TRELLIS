@@ -9,7 +9,7 @@ import torch
 from editing.hooks import PromptToPromptHook, StageConfig
 from editing.inversion import denoise_slat, denoise_sparse_structure, invert_slat, invert_sparse_structure
 from editing.methods.base import EditMethod, EditMethodConfig, EditMethodInputs, EditMethodOutputs
-from editing.preprocess.asset_3d import load_ply_positions, ply_to_coords, project_sparse_terminal_noise
+from editing.preprocess.asset_3d import ply_to_coords, project_sparse_terminal_noise, feats_to_slat, coords_to_voxel
 
 
 class ImagePromptToPromptRFInversionMethod(EditMethod):
@@ -39,6 +39,8 @@ class ImagePromptToPromptRFInversionMethod(EditMethod):
         Returns:
             Dictionary with prepared state
         """
+        import gc
+
         # Validate inputs
         if inputs.source_voxels_path is None or inputs.source_features_path is None:
             raise RuntimeError("RF inversion requires source_voxels_path and source_features_path")
@@ -64,11 +66,22 @@ class ImagePromptToPromptRFInversionMethod(EditMethod):
             )
 
         # Load source assets
-        voxel_positions = load_ply_positions(inputs.source_voxels_path)
-        source_coords = ply_to_coords(voxel_positions, pipeline.sparse_structure_sampler_params["grid_size"])
+        # Get resolution from pipeline params (default 64)
+        resolution = pipeline.sparse_structure_sampler_params.get("grid_size", 64)
+        source_coords = ply_to_coords(inputs.source_voxels_path, pipeline.device, resolution)
 
-        features_data = np.load(inputs.source_features_path)
-        source_slat = pipeline.unpack_slat_from_npz(features_data)
+        # Clean up after loading coords
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        from trellis.modules import sparse as sp
+        source_slat = feats_to_slat(pipeline, inputs.source_features_path, sp.SparseTensor)
+
+        # Clean up after loading SLAT
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # Encode conditions
         source_cond_dict = pipeline.get_cond([inputs.source_image])
@@ -78,13 +91,19 @@ class ImagePromptToPromptRFInversionMethod(EditMethod):
         edit_cond = edit_cond_dict["cond"]
         neg_cond = source_cond_dict["neg_cond"]
 
-        # Build patch metadata (reuse from image_prompt_to_prompt)
-        from editing.utils.patch_utils import build_patch_metadata
+        # Clean up after encoding
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
-        patch_meta = build_patch_metadata(
-            source_image=inputs.source_image,
-            edit_image=inputs.edit_image,
-            mask_image=inputs.mask_image,
+        # Build token metadata (reuse from image_prompt_to_prompt)
+        from editing.utils.token_utils import build_image_token_metadata, resolve_patch_size
+
+        patch_size = resolve_patch_size(pipeline.models["image_cond_model"].patch_size)
+        token_meta = build_image_token_metadata(
+            cond=edit_cond,
+            mask=inputs.mask_image,
+            patch_size=patch_size,
             patch_coverage_threshold=extra.get("patch_coverage_threshold", 0.0),
         )
 
@@ -93,7 +112,7 @@ class ImagePromptToPromptRFInversionMethod(EditMethod):
             source_cond=source_cond,
             edit_cond=edit_cond,
             neg_cond=neg_cond,
-            patch_meta=patch_meta,
+            token_meta=token_meta,
             stage_configs=stage_configs,
             query_chunk=query_chunk,
         )
@@ -103,8 +122,9 @@ class ImagePromptToPromptRFInversionMethod(EditMethod):
             "source_slat": source_slat,
             "source_cond_dict": source_cond_dict,
             "edit_cond_dict": edit_cond_dict,
-            "patch_meta": patch_meta,
+            "token_meta": token_meta,
             "stage_configs": stage_configs,
+            "resolution": resolution,
         }
 
     def run(
@@ -123,10 +143,13 @@ class ImagePromptToPromptRFInversionMethod(EditMethod):
         Returns:
             EditMethodOutputs with results
         """
+        import gc
+
         source_coords = prepared_state["source_coords"]
         source_slat = prepared_state["source_slat"]
         source_cond_dict = prepared_state["source_cond_dict"]
         edit_cond_dict = prepared_state["edit_cond_dict"]
+        resolution = prepared_state["resolution"]
 
         # Get sampler params
         ss_params = config.sparse_structure_sampler_params or pipeline.sparse_structure_sampler_params
@@ -135,16 +158,27 @@ class ImagePromptToPromptRFInversionMethod(EditMethod):
         extra = config.extra_params or {}
         cfg_interval = (extra.get("cfg_interval_start", 0.0), extra.get("cfg_interval_end", 1.0))
 
+        # Get decode formats (default to mesh only for memory efficiency)
+        decode_formats = extra.get("decode_formats", ["mesh"])
+
         # Step 1: Invert sparse structure
+        # Convert coords to voxel tensor
+        source_voxel = coords_to_voxel(source_coords, pipeline.device, resolution)
         torch.manual_seed(config.seed)
         ss_terminal_noise = invert_sparse_structure(
             pipeline=pipeline,
             cond_src=source_cond_dict,
-            voxel_src=source_coords,
+            voxel_src=source_voxel,
             params=ss_params,
             cfg_interval=cfg_interval,
             verbose=False,
         )
+
+        # Clean up after sparse structure inversion
+        del source_voxel
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # Step 2: Invert SLAT
         slat_terminal_noise = invert_slat(
@@ -155,6 +189,12 @@ class ImagePromptToPromptRFInversionMethod(EditMethod):
             cfg_interval=cfg_interval,
             verbose=False,
         )
+
+        # Clean up source assets
+        del source_slat
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # Patch models with hook
         if self.hook:
@@ -172,8 +212,23 @@ class ImagePromptToPromptRFInversionMethod(EditMethod):
             verbose=False,
         )
 
+        # Clean up after sparse structure denoising
+        del ss_terminal_noise
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         # Step 4: Project SLAT terminal noise to new coordinates
-        projected_noise = project_sparse_terminal_noise(slat_terminal_noise, coords, coords.device)
+        from trellis.modules import sparse as sp
+        projected_noise = project_sparse_terminal_noise(
+            slat_terminal_noise, coords, coords.device, sp.SparseTensor, resolution
+        )
+
+        # Clean up original terminal noise
+        del slat_terminal_noise
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # Step 5: Denoise SLAT with P2P
         slat = denoise_slat(
@@ -185,12 +240,18 @@ class ImagePromptToPromptRFInversionMethod(EditMethod):
             verbose=False,
         )
 
-        # Decode
-        outputs = pipeline.decode_slat(slat, ["mesh", "gaussian", "radiance_field"])
+        # Clean up before decode
+        del projected_noise, coords
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        # Decode with memory-efficient format list
+        outputs = pipeline.decode_slat(slat, decode_formats)
 
         return EditMethodOutputs(
             outputs=outputs,
-            metadata=prepared_state["patch_meta"],
+            metadata=prepared_state["token_meta"],
         )
 
     def save_artifacts(
@@ -257,4 +318,8 @@ class ImagePromptToPromptRFInversionMethod(EditMethod):
             "skip_render": True,
             "skip_glb": False,
             "skip_ply": False,
+            "decode_formats": ["mesh", "gaussian"],  # Decode mesh and gaussian (skip radiance_field to save memory)
+            # Reduce steps for memory efficiency (RF inversion is memory-intensive)
+            "sparse_structure_steps": 12,  # Reduced from default 25
+            "slat_steps": 12,  # Reduced from default 25
         }
