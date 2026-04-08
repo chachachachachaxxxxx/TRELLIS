@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # 测试所有已迁移的编辑方法
-# 使用统一的 case 名称: test0
+# 使用统一的 case 名称: test1
 # UniEdit 的三种消融模式作为独立方法测试
 
 set -e  # 遇到错误立即退出
 
-CASE_NAME="test0"
+CASE_NAME="test1"
 SEED=1
 GPU=3
 
@@ -119,7 +119,7 @@ else
       --ss-steps 12 \
       --slat-steps 12 \
       --extra-param stage2_variant=preserve_uniedit \
-      --extra-param decode_modes='[\"mesh\"]'"
+      --extra-param decode_modes=mesh,gaussian"
 
     if [ $? -eq 0 ]; then
         echo "✅ image_uniedit_rf_inversion (preserve_uniedit) 测试通过"
@@ -147,7 +147,7 @@ else
       --ss-steps 12 \
       --slat-steps 12 \
       --extra-param stage2_variant=free_target \
-      --extra-param decode_modes='[\"mesh\"]'"
+      --extra-param decode_modes=mesh,gaussian"
 
     if [ $? -eq 0 ]; then
         echo "✅ image_uniedit_rf_inversion (free_target) 测试通过"
@@ -175,7 +175,7 @@ else
       --ss-steps 12 \
       --slat-steps 12 \
       --extra-param stage2_variant=latent_replace_union \
-      --extra-param decode_modes='[\"mesh\"]'"
+      --extra-param decode_modes=mesh,gaussian"
 
     if [ $? -eq 0 ]; then
         echo "✅ image_uniedit_rf_inversion (latent_replace_union) 测试通过"
