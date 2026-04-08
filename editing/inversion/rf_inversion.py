@@ -1,4 +1,4 @@
-"""RF (Rectified Flow) inversion utilities for TRELLIS editing."""
+"""RF-Solver inversion utilities for TRELLIS editing."""
 from __future__ import annotations
 
 from typing import Tuple
@@ -67,12 +67,12 @@ def invert_sparse_structure(
     Returns:
         Terminal noise tensor
     """
-    from editing.inversion.rf_sampler import SecondOrderRFSampler
+    from editing.inversion.rf_sampler import RFSolverSampler
 
     encoder = pipeline.models["sparse_structure_encoder"]
     flow_model = pipeline.models["sparse_structure_flow_model"]
     z_src = encoder(voxel_src)
-    sampler = SecondOrderRFSampler()
+    sampler = RFSolverSampler()
     return sampler.sample(
         model=flow_model,
         sample=z_src,
@@ -107,11 +107,11 @@ def denoise_sparse_structure(
     Returns:
         Sparse structure coordinates
     """
-    from editing.inversion.rf_sampler import SecondOrderRFSampler
+    from editing.inversion.rf_sampler import RFSolverSampler
 
     flow_model = pipeline.models["sparse_structure_flow_model"]
     decoder = pipeline.models["sparse_structure_decoder"]
-    sampler = SecondOrderRFSampler()
+    sampler = RFSolverSampler()
     z_tgt = sampler.sample(
         model=flow_model,
         sample=terminal_noise,
@@ -151,12 +151,12 @@ def invert_slat(
     Returns:
         Terminal noise tensor
     """
-    from editing.inversion.rf_sampler import SecondOrderRFSampler
+    from editing.inversion.rf_sampler import RFSolverSampler
 
     flow_model = pipeline.models["slat_flow_model"]
     mean, std = get_slat_norm_tensors(pipeline, slat_src.device, slat_src.feats.dtype)
     slat_normalized = (slat_src - mean) / std
-    sampler = SecondOrderRFSampler()
+    sampler = RFSolverSampler()
     return sampler.sample(
         model=flow_model,
         sample=slat_normalized,
@@ -191,10 +191,10 @@ def denoise_slat(
     Returns:
         Denoised SLAT tensor
     """
-    from editing.inversion.rf_sampler import SecondOrderRFSampler
+    from editing.inversion.rf_sampler import RFSolverSampler
 
     flow_model = pipeline.models["slat_flow_model"]
-    sampler = SecondOrderRFSampler()
+    sampler = RFSolverSampler()
     slat_normalized = sampler.sample(
         model=flow_model,
         sample=terminal_noise,

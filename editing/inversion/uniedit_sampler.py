@@ -1,4 +1,4 @@
-"""UniEdit RF Sampler for two-stage editing with source/target fusion."""
+"""UniEdit RF-Solver for two-stage editing with source/target fusion."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from .rf_sampler import SecondOrderRFSampler
+from .rf_sampler import RFSolverSampler
 
 
 def _dense_scalar_field(x: torch.Tensor) -> torch.Tensor:
@@ -86,8 +86,8 @@ def compute_uniedit_map(guidance, selector: Optional[torch.Tensor] = None) -> to
     raise RuntimeError(f"Unsupported guidance type: {type(guidance)}")
 
 
-class UniEditRFSampler(SecondOrderRFSampler):
-    """RF Sampler with UniEdit source/target velocity fusion.
+class UniEditRFSolver(RFSolverSampler):
+    """RF-Solver with UniEdit source/target velocity fusion.
 
     Supports three modes:
     - full_uniedit: Complete UniEdit fusion with omega guidance
@@ -95,6 +95,7 @@ class UniEditRFSampler(SecondOrderRFSampler):
     - target_only: Only use target branch (no fusion)
     """
 
+    @torch.no_grad()
     def _guided_prediction_for_cond(
         self,
         model,
@@ -131,6 +132,7 @@ class UniEditRFSampler(SecondOrderRFSampler):
             return result
         return self._run_model(model, sample, t_value, cond)
 
+    @torch.no_grad()
     def _merged_prediction(
         self,
         model,
@@ -209,6 +211,7 @@ class UniEditRFSampler(SecondOrderRFSampler):
 
         return pred
 
+    @torch.no_grad()
     def sample_once(
         self,
         model,
@@ -278,6 +281,7 @@ class UniEditRFSampler(SecondOrderRFSampler):
 
         return result
 
+    @torch.no_grad()
     def sample(
         self,
         model,
@@ -319,15 +323,13 @@ class UniEditRFSampler(SecondOrderRFSampler):
         t_pairs = list((float(t_seq[i]), float(t_seq[i + 1])) for i in range(len(t_seq) - 1))
 
         desc_map = {
-            "full_uniedit": "UniEdit denoise",
-            "preserve_overlap": "UniEdit denoise (preserve overlap)",
-            "target_only": "Target-only denoise",
+            "full_uniedit": "UniEdit RF-Solver denoise",
+            "preserve_overlap": "UniEdit RF-Solver denoise (preserve overlap)",
+            "target_only": "Target-only RF-Solver denoise",
         }
 
-        # Use no_grad to save memory (no gradients needed for inference)
-        with torch.no_grad():
-            for t_curr, t_next in tqdm(t_pairs, desc=desc_map.get(mode, "UniEdit denoise"), disable=not verbose):
-                sample = self.sample_once(
+        for t_curr, t_next in tqdm(t_pairs, desc=desc_map.get(mode, "UniEdit RF-Solver denoise"), disable=not verbose):
+            sample = self.sample_once(
                     model=model,
                     sample=sample,
                     t_curr=t_curr,

@@ -7,7 +7,7 @@ from typing import Dict, Tuple
 import torch
 
 from editing.inversion import invert_slat, invert_sparse_structure
-from editing.inversion.uniedit_sampler import UniEditRFSampler
+from editing.inversion.uniedit_sampler import UniEditRFSolver
 from editing.methods.base import EditMethod, EditMethodConfig, EditMethodInputs, EditMethodOutputs
 from editing.preprocess.asset_3d import coords_to_voxel, feats_to_slat, ply_to_coords, project_sparse_terminal_noise
 from editing.utils.uniedit_utils import build_sparse_replace_index_map, build_stage2_selector, compose_stage1_coords
@@ -311,7 +311,7 @@ class ImageUniEditRFInversionMethod(EditMethod):
         """Denoise sparse structure with UniEdit fusion."""
         flow_model = pipeline.models["sparse_structure_flow_model"]
         decoder = pipeline.models["sparse_structure_decoder"]
-        sampler = UniEditRFSampler()
+        sampler = UniEditRFSolver()
 
         z_tgt = sampler.sample(
             model=flow_model,
@@ -349,7 +349,7 @@ class ImageUniEditRFInversionMethod(EditMethod):
     ):
         """Denoise SLAT with UniEdit variant."""
         flow_model = pipeline.models["slat_flow_model"]
-        sampler = UniEditRFSampler()
+        sampler = UniEditRFSolver()
 
         slat_normalized = sampler.sample(
             model=flow_model,
@@ -385,13 +385,13 @@ class ImageUniEditRFInversionMethod(EditMethod):
         cfg_interval: Tuple[float, float],
     ):
         """Invert SLAT with trajectory caching for latent_replace_union."""
-        from editing.inversion.latent_replace_sampler import SparseLatentReplaceRFSampler
+        from editing.inversion.latent_replace_sampler import SparseLatentReplaceRFSolver
         from editing.inversion.rf_inversion import get_slat_norm_tensors
 
         flow_model = pipeline.models["slat_flow_model"]
         mean, std = get_slat_norm_tensors(pipeline, slat_src.device, slat_src.feats.dtype)
         slat_normalized = (slat_src - mean) / std
-        sampler = SparseLatentReplaceRFSampler()
+        sampler = SparseLatentReplaceRFSolver()
         return sampler.invert_with_cache(
             model=flow_model,
             sample=slat_normalized,
@@ -415,11 +415,11 @@ class ImageUniEditRFInversionMethod(EditMethod):
         replace_source_indices: torch.Tensor,
     ):
         """Denoise SLAT with latent replacement."""
-        from editing.inversion.latent_replace_sampler import SparseLatentReplaceRFSampler
+        from editing.inversion.latent_replace_sampler import SparseLatentReplaceRFSolver
         from editing.inversion.rf_inversion import get_slat_norm_tensors
 
         flow_model = pipeline.models["slat_flow_model"]
-        sampler = SparseLatentReplaceRFSampler()
+        sampler = SparseLatentReplaceRFSolver()
         slat_normalized = sampler.sample_with_replacement(
             model=flow_model,
             sample=terminal_noise,
