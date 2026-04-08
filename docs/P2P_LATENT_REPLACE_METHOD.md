@@ -1,52 +1,59 @@
-# Image P2P with Latent Replace by Mask
+# Image P2P with Latent Blend (Mask-Based)
 
 ## 概述
 
-`image_p2p_latent_replace` 是一个简化的编辑方法，结合：
+`image_p2p_latent_blend` 是一个简化的编辑方法，结合：
 1. **P2P attention injection**：细粒度的注意力控制
-2. **Mask-based latent replacement**：根据 mask 直接替换 latent（比 UniEdit 简单）
+2. **Mask-based latent blending**：在重合体素上根据 mask 混合 SLAT 特征
 3. **Soft mask support**：边界软混合（类似 VoxHammer）
+
+## 方法名称说明
+
+- **文件名**：`image_p2p_latent_blend.py`
+- **方法名**：`image_p2p_latent_blend`
+- **"Blend" vs "Replace"**：使用 "blend" 强调这是后处理混合，而非去噪中替换
 
 ## 与其他方法的区别
 
 ### vs Image P2P
 - **Image P2P**：只使用 attention injection
-- **P2P + Latent Replace**：attention injection + 直接 latent 替换
+- **P2P + Latent Blend**：attention injection + 后处理 latent 混合
 
 ### vs UniEdit
-- **UniEdit**：RF inversion + 双路径去噪 + latent 混合（复杂）
-- **P2P + Latent Replace**：单路径去噪 + mask-based 替换（简单）
+- **UniEdit**：RF inversion + 去噪中双路径混合（复杂）
+- **P2P + Latent Blend**：后处理混合（简单）
 
 ### vs Hybrid (UniEdit + P2P)
 - **Hybrid**：完整 UniEdit + P2P（最复杂，最强保留）
-- **P2P + Latent Replace**：简化版本（更快，足够好）
+- **P2P + Latent Blend**：简化版本（更快，足够好）
 
 ## 核心原理
 
-### 1. Latent Replace by Mask
+### 1. 后处理混合策略
 
-在去噪的每一步：
+与去噪中替换不同，这个方法采用后处理混合：
 
 ```python
-for t in timesteps:
-    # 1. 对编辑图像去噪一步
-    x_edit = denoise_step(x_edit, t, edit_cond)
+# 1. 分别生成源和编辑的完整 3D
+source_slat = generate(source_image)
+edit_slat = generate(edit_image)
+
+# 2. 找到重合体素
+overlapping_voxels = find_overlap(source_coords, edit_coords)
+
+# 3. 对每个重合体素混合特征
+for voxel in overlapping_voxels:
+    # 将 3D 坐标投影到 2D mask
+    mask_value = project_and_sample_mask(voxel, spatial_mask)
     
-    # 2. 对源图像去噪一步（同步）
-    x_source = denoise_step(x_source, t, source_cond)
-    
-    # 3. 根据 mask 混合 latent
-    mask_3d = resize_mask_to_latent(spatial_mask, x_edit.shape)
-    x_mixed = mask_3d * x_edit + (1 - mask_3d) * x_source
-    
-    # 4. 继续用混合后的 latent
-    x_edit = x_mixed
+    # 混合特征
+    blended_feat = mask_value * edit_feat + (1 - mask_value) * source_feat
 ```
 
-**关键点**：
-- 不需要 RF inversion（比 UniEdit 简单）
-- 直接在 latent 空间混合（不是在噪声预测空间）
-- Mask 控制哪些区域保留源，哪些区域使用编辑
+**优势**：
+- 不需要 hook 采样器内部
+- 实现简单，易于理解
+- 已完整实现
 
 ### 2. Soft Mask（可选）
 
@@ -65,25 +72,24 @@ mask_soft = [[0.0, 0.2, 0.8, 1.0],
 **效果**：
 - 边界处平滑过渡
 - 避免明显的接缝
-- 类似 VoxHammer 的软混合
+- 类似 VoxHammer 的软混合（参考 `temp/edit_pipeline.py`）
 
 ### 3. 与 P2P Attention 的协同
 
+P2P 和 latent blend 在不同阶段工作：
+
 ```python
-# 在每个去噪步骤
-for t in timesteps:
-    # P2P 在 model() 内部工作
-    x_edit = denoise_step(x_edit, t, edit_cond)  # ← P2P hook 拦截 attention
-    x_source = denoise_step(x_source, t, source_cond)  # ← P2P hook 拦截 attention
-    
-    # Latent replace 在外部工作
-    x_mixed = mask * x_edit + (1 - mask) * x_source
-    x_edit = x_mixed
+# 阶段 1: 生成时 P2P 工作
+source_slat = generate(source_image)  # ← P2P hook 拦截 attention
+edit_slat = generate(edit_image)      # ← P2P hook 拦截 attention
+
+# 阶段 2: 后处理混合
+blended_slat = blend_features(source_slat, edit_slat, mask)
 ```
 
 **两者互补**：
-- P2P 控制特征级别的细节
-- Latent replace 控制结构级别的保留
+- P2P 控制生成时的特征级别细节
+- Latent blend 控制最终的结构级别保留
 
 ## 使用方法
 
@@ -91,7 +97,7 @@ for t in timesteps:
 
 ```bash
 python run_edit_experiment.py \
-  --method image_p2p_latent_replace \
+  --method image_p2p_latent_blend \
   --source-image <source.png> \
   --edit-image <edit.png> \
   --mask-image <mask.png> \
@@ -108,49 +114,72 @@ python run_edit_experiment.py \
 - `*_t_start`, `*_t_end`: 时间步范围
 - `*_strength`: 注意力混合强度
 
-#### Latent Replacement 参数
+#### Latent Blending 参数
 
-- `enable_latent_replace`: 是否启用 latent 替换，默认 `true`
-- `latent_replace_steps`: 应用替换的步数比例，默认 `0.5`（前 50% 步骤）
-  - `1.0` = 所有步骤都替换（最强保留）
-  - `0.5` = 前半段替换（平衡）
-  - `0.0` = 不替换（退化为纯 P2P）
+- `blend_ss_enabled`: 是否在 sparse structure 阶段混合，默认 `false`
+  - 通常不需要，因为 SS 是坐标，难以混合
+  
+- `blend_slat_enabled`: 是否在 SLAT 阶段混合，默认 `true`
+  - 这是主要功能，在 SLAT 特征层面混合
 
-#### Soft Mask 参数
+- `ss_blend_mode`: SS 阶段的 mask 模式，默认 `"hard"`
+  - `"hard"`: 硬边界
+  - `"soft"`: Gaussian blur 软边界
 
-- `soft_mask_enabled`: 是否启用软 mask，默认 `false`
-- `soft_mask_kernel_size`: Gaussian kernel 大小，默认 `3`
+- `slat_blend_mode`: SLAT 阶段的 mask 模式，默认 `"soft"`
+  - `"hard"`: 硬边界
+  - `"soft"`: Gaussian blur 软边界（推荐）
+
+- `ss_soft_kernel_size`: SS 阶段 Gaussian kernel 大小，默认 `3`
+- `slat_soft_kernel_size`: SLAT 阶段 Gaussian kernel 大小，默认 `5`
   - 越大越平滑，但过渡区域越宽
   - 推荐：3-7
+
+- `blend_strength`: 整体混合强度，默认 `1.0`
+  - `1.0` = 完全混合
+  - `0.5` = 半强度混合
+  - `0.0` = 不混合（退化为纯编辑）
 
 ### 完整示例
 
 ```bash
-# 基础版本（硬 mask）
+# 基础版本（SLAT 阶段 soft mask）
 python run_edit_experiment.py \
-  --method image_p2p_latent_replace \
+  --method image_p2p_latent_blend \
   --source-image assets/edit_example/images/2d_render.png \
   --edit-image assets/edit_example/images/2d_edit.png \
   --mask-image assets/edit_example/images/2d_mask.png \
-  --case-name p2p_replace_test \
+  --case-name p2p_blend_test \
   --seed 1 \
   --preprocess \
-  --extra-param enable_latent_replace=true \
-  --extra-param latent_replace_steps=0.5
+  --extra-param blend_slat_enabled=true \
+  --extra-param slat_blend_mode=soft \
+  --extra-param slat_soft_kernel_size=5
 
-# 软 mask 版本（平滑边界）
+# 消融实验：hard mask
 python run_edit_experiment.py \
-  --method image_p2p_latent_replace \
+  --method image_p2p_latent_blend \
   --source-image assets/edit_example/images/2d_render.png \
   --edit-image assets/edit_example/images/2d_edit.png \
   --mask-image assets/edit_example/images/2d_mask.png \
-  --case-name p2p_replace_soft \
+  --case-name p2p_blend_hard \
   --seed 1 \
   --preprocess \
-  --extra-param enable_latent_replace=true \
-  --extra-param latent_replace_steps=0.8 \
-  --extra-param soft_mask_enabled=true \
-  --extra-param soft_mask_kernel_size=5
+  --extra-param blend_slat_enabled=true \
+  --extra-param slat_blend_mode=hard
+
+# 消融实验：不同 kernel size
+python run_edit_experiment.py \
+  --method image_p2p_latent_blend \
+  --source-image assets/edit_example/images/2d_render.png \
+  --edit-image assets/edit_example/images/2d_edit.png \
+  --mask-image assets/edit_example/images/2d_mask.png \
+  --case-name p2p_blend_kernel7 \
+  --seed 1 \
+  --preprocess \
+  --extra-param blend_slat_enabled=true \
+  --extra-param slat_blend_mode=soft \
+  --extra-param slat_soft_kernel_size=7
 ```
 
 ## 输入要求
@@ -217,26 +246,106 @@ python run_edit_experiment.py \
 
 ## 实现状态
 
-⚠️ **当前状态**：框架已实现，核心 latent replacement 逻辑需要完善
+✅ **已完整实现**
 
-需要实现的部分：
-1. Hook 到采样器的去噪循环
-2. 在每步同步对源和编辑图像去噪
-3. 根据 mask 混合 latent
-4. 处理 sparse structure 和 SLAT 的不同空间结构
+核心功能：
+- ✅ 找到重合体素
+- ✅ 3D 坐标投影到 2D mask
+- ✅ 根据 mask 值混合特征
+- ✅ Hard/soft mask 支持
+- ✅ 两阶段独立控制
 
-## 技术挑战
+实现文件：
+- `editing/methods/image_p2p_latent_blend.py` - 完整实现
+- `_blend_slat_features()` - 核心混合逻辑
 
-1. **空间对齐**：2D mask 需要映射到 3D latent 空间
-2. **Sparse 结构**：稀疏坐标的 mask 应用
-3. **采样器 hook**：需要拦截去噪循环
+## 技术细节
+
+### 重合体素查找
+
+使用 hash-based 快速查找：
+
+```python
+# 将 3D 坐标转换为 hash 字符串
+src_hash = [f"{x}_{y}_{z}" for x, y, z in src_coords]
+edit_hash = [f"{x}_{y}_{z}" for x, y, z in edit_coords]
+
+# 找交集
+overlap = set(src_hash) & set(edit_hash)
+```
+
+### 3D 到 2D 投影
+
+简单的 top-down 投影：
+
+```python
+# 假设 z 是深度，投影 (x, y) 到 mask
+u = int((x / resolution) * mask_width)
+v = int((y / resolution) * mask_height)
+mask_value = mask[v, u]
+```
+
+**注意**：这是简化的投影，实际应用可能需要考虑相机参数。
+
+### 特征混合
+
+```python
+# mask_value = 0 -> 保留源
+# mask_value = 1 -> 使用编辑
+blend_weight = (1.0 - mask_value) * blend_strength
+blended = blend_weight * source_feat + (1 - blend_weight) * edit_feat
+```
 
 ## 未来改进
 
-1. 实现完整的 latent replacement 逻辑
-2. 优化 mask 到 latent 的映射
-3. 支持 3D mask（从 GLB）
-4. 自适应 soft mask（根据内容自动调整）
+1. **改进投影方法**：使用实际相机参数而非简单 top-down
+2. **3D mask 支持**：直接使用 3D mask GLB 而非 2D 投影
+3. **自适应 soft mask**：根据内容自动调整 kernel size
+4. **Sparse structure 混合**：实现坐标级别的混合（当前只混合 SLAT）
+
+## 消融实验建议
+
+### Hard vs Soft Mask
+
+```bash
+# Hard mask
+--extra-param slat_blend_mode=hard
+
+# Soft mask (kernel=3)
+--extra-param slat_blend_mode=soft --extra-param slat_soft_kernel_size=3
+
+# Soft mask (kernel=5)
+--extra-param slat_blend_mode=soft --extra-param slat_soft_kernel_size=5
+
+# Soft mask (kernel=7)
+--extra-param slat_blend_mode=soft --extra-param slat_soft_kernel_size=7
+```
+
+### 混合强度
+
+```bash
+# 完全混合
+--extra-param blend_strength=1.0
+
+# 半强度
+--extra-param blend_strength=0.5
+
+# 弱混合
+--extra-param blend_strength=0.3
+```
+
+### 阶段控制
+
+```bash
+# 只混合 SLAT（推荐）
+--extra-param blend_ss_enabled=false --extra-param blend_slat_enabled=true
+
+# 两阶段都混合
+--extra-param blend_ss_enabled=true --extra-param blend_slat_enabled=true
+
+# 不混合（退化为纯 P2P）
+--extra-param blend_ss_enabled=false --extra-param blend_slat_enabled=false
+```
 
 ## 参考
 
