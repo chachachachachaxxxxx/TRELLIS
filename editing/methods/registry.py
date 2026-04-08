@@ -128,6 +128,11 @@ try:
 except ImportError:
     ImageUniEditP2PHybridMethod = None
 
+try:
+    from .image_uniedit_euler import ImageUniEditEulerMethod
+except ImportError:
+    ImageUniEditEulerMethod = None
+
 
 METHODS = {
     "image_prompt_to_prompt": MethodSpec(
@@ -205,6 +210,20 @@ METHODS = {
         ),
         requires_source_assets=True,
         method_class=ImageUniEditP2PHybridMethod,
+    ),
+    "image_uniedit_euler": MethodSpec(
+        name="image_uniedit_euler",
+        script_path=REPO_ROOT / "example_image_uniedit_euler.py",
+        description="UniEdit with first-order Euler + predictor-corrector (simplified version without RF-Solver).",
+        required_fields=("edit_image", "mask_glb"),
+        path_args=(
+            ("input_model", "--input_model"),
+            ("source_image", "--source-image"),
+            ("edit_image", "--edit-image"),
+            ("mask_glb", "--mask_glb"),
+        ),
+        requires_source_assets=True,
+        method_class=ImageUniEditEulerMethod,
     ),
 }
 

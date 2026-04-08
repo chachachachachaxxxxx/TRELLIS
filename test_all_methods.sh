@@ -6,7 +6,7 @@
 
 set -e  # 遇到错误立即退出
 
-CASE_NAME="test1"
+CASE_NAME="test2"
 SEED=1
 GPU=3
 

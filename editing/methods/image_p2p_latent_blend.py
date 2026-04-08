@@ -215,6 +215,7 @@ class ImageP2PLatentBlendMethod(EditMethod):
 
         # Step 3: Blend SLAT features based on mask
         print(f"Blending SLAT features (strength={blend_strength})...")
+        resolution = pipeline.sparse_structure_sampler_params.get("grid_size", 64)
         blended_slat = self._blend_slat_features(
             source_slat=source_slat,
             edit_slat=edit_slat,
@@ -222,6 +223,7 @@ class ImageP2PLatentBlendMethod(EditMethod):
             edit_coords=edit_coords,
             spatial_mask=spatial_mask,
             blend_strength=blend_strength,
+            resolution=resolution,
             device=pipeline.device,
         )
 
@@ -249,38 +251,117 @@ class ImageP2PLatentBlendMethod(EditMethod):
         edit_coords,
         spatial_mask: torch.Tensor,
         blend_strength: float,
+        resolution: int,
         device: torch.device,
     ):
-        """Blend SLAT features based on spatial mask.
+        """Blend SLAT features based on spatial mask at overlapping voxels.
 
-        This is a simplified version - proper implementation would need:
-        1. Map 2D mask to 3D voxel space
-        2. Handle sparse tensor structure
-        3. Interpolate features at matching coordinates
-
-        For now, we do a simple feature-level blend.
+        Key idea: For voxels that exist in both source and edit,
+        blend their features based on the mask value at that spatial location.
 
         Args:
             source_slat: Source SLAT (SparseTensor)
             edit_slat: Edit SLAT (SparseTensor)
-            source_coords: Source coordinates
-            edit_coords: Edit coordinates
-            spatial_mask: 2D spatial mask [1, 1, H, W]
+            source_coords: Source coordinates [N_src, 4] (batch, x, y, z)
+            edit_coords: Edit coordinates [N_edit, 4] (batch, x, y, z)
+            spatial_mask: 2D spatial mask [1, 1, H, W], 0=preserve source, 1=use edit
             blend_strength: Blending strength (0-1)
+            resolution: Voxel grid resolution
             device: Device
 
         Returns:
             Blended SLAT (SparseTensor)
         """
-        # For simplicity, just return edit_slat
-        # Full implementation would require:
-        # 1. Project 2D mask to 3D voxel coordinates
-        # 2. Find matching voxels between source and edit
-        # 3. Blend features based on mask values
-        # 4. Handle non-overlapping regions
+        # Check if SparseTensor
+        if not (hasattr(source_slat, 'coords') and hasattr(source_slat, 'feats')):
+            print("Warning: source_slat is not a SparseTensor, returning edit_slat")
+            return edit_slat
 
-        print("Warning: SLAT blending not fully implemented, returning edit SLAT")
-        return edit_slat
+        if not (hasattr(edit_slat, 'coords') and hasattr(edit_slat, 'feats')):
+            print("Warning: edit_slat is not a SparseTensor, returning edit_slat")
+            return edit_slat
+
+        # Get coordinates and features
+        src_coords = source_slat.coords  # [N_src, 4]
+        src_feats = source_slat.feats    # [N_src, C]
+        edit_coords = edit_slat.coords   # [N_edit, 4]
+        edit_feats = edit_slat.feats     # [N_edit, C]
+
+        # Find overlapping voxels
+        # Convert coords to hashable format for matching
+        src_coords_3d = src_coords[:, 1:].cpu()  # [N_src, 3] (x, y, z)
+        edit_coords_3d = edit_coords[:, 1:].cpu()  # [N_edit, 3] (x, y, z)
+
+        # Create coordinate hash for fast lookup
+        def coords_to_hash(coords_3d):
+            """Convert 3D coords to hash strings."""
+            return [f"{int(x)}_{int(y)}_{int(z)}" for x, y, z in coords_3d.tolist()]
+
+        src_hash = coords_to_hash(src_coords_3d)
+        edit_hash = coords_to_hash(edit_coords_3d)
+
+        # Build hash to index mapping
+        src_hash_to_idx = {h: i for i, h in enumerate(src_hash)}
+        edit_hash_to_idx = {h: i for i, h in enumerate(edit_hash)}
+
+        # Find overlapping voxels
+        overlap_hashes = set(src_hash) & set(edit_hash)
+        print(f"Found {len(overlap_hashes)} overlapping voxels out of {len(src_hash)} source and {len(edit_hash)} edit voxels")
+
+        if len(overlap_hashes) == 0:
+            print("No overlapping voxels, returning edit_slat")
+            return edit_slat
+
+        # For each overlapping voxel, compute blend weight from mask
+        blended_feats = edit_feats.clone()
+
+        # Get mask resolution
+        mask_h, mask_w = spatial_mask.shape[2], spatial_mask.shape[3]
+
+        for hash_str in overlap_hashes:
+            src_idx = src_hash_to_idx[hash_str]
+            edit_idx = edit_hash_to_idx[hash_str]
+
+            # Get 3D coordinate
+            x, y, z = src_coords_3d[src_idx]
+
+            # Project 3D coordinate to 2D mask space
+            # Assume z is depth, project (x, y) to mask
+            # Normalize to [0, 1] range (assuming coords are in [0, resolution])
+            # This is a simplified projection - proper implementation would need camera parameters
+            resolution = 64  # Default resolution, should be passed as parameter
+
+            # Simple top-down projection: (x, y) -> (u, v)
+            u = int((x / resolution) * mask_w)
+            v = int((y / resolution) * mask_h)
+            u = max(0, min(mask_w - 1, u))
+            v = max(0, min(mask_h - 1, v))
+
+            # Get mask value at this location
+            mask_value = spatial_mask[0, 0, v, u].item()  # 0 = preserve source, 1 = use edit
+
+            # Blend features: blend_weight controls how much to use source
+            # mask_value = 0 -> use source (blend_weight = 1)
+            # mask_value = 1 -> use edit (blend_weight = 0)
+            blend_weight = (1.0 - mask_value) * blend_strength
+
+            # Blend: result = blend_weight * source + (1 - blend_weight) * edit
+            src_feat = src_feats[src_idx]
+            edit_feat = edit_feats[edit_idx]
+            blended_feat = blend_weight * src_feat + (1.0 - blend_weight) * edit_feat
+
+            # Update edit features
+            blended_feats[edit_idx] = blended_feat
+
+        # Create blended SLAT with edit coords and blended features
+        from trellis.modules import sparse as sp
+        blended_slat = sp.SparseTensor(
+            feats=blended_feats,
+            coords=edit_coords,
+        )
+
+        print(f"Blended {len(overlap_hashes)} voxel features (strength={blend_strength})")
+        return blended_slat
 
     def save_artifacts(
         self,
