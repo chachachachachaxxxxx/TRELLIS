@@ -52,8 +52,12 @@ class ImageP2PLatentBlendMethod(EditMethod):
         query_chunk = extra.get("query_chunk", 1024)
 
         # Latent blending params
-        blend_mode = extra.get("blend_mode", "hard")  # "hard" or "soft"
-        soft_kernel_size = extra.get("soft_kernel_size", 5)
+        blend_ss_enabled = extra.get("blend_ss_enabled", False)  # Sparse structure blending
+        blend_slat_enabled = extra.get("blend_slat_enabled", True)  # SLAT blending
+        ss_blend_mode = extra.get("ss_blend_mode", "hard")  # "hard" or "soft"
+        slat_blend_mode = extra.get("slat_blend_mode", "soft")  # "hard" or "soft"
+        ss_soft_kernel = extra.get("ss_soft_kernel_size", 3)
+        slat_soft_kernel = extra.get("slat_soft_kernel_size", 5)
         blend_strength = extra.get("blend_strength", 1.0)  # 1.0 = full blend
 
         # Build stage configs
@@ -88,12 +92,23 @@ class ImageP2PLatentBlendMethod(EditMethod):
             patch_coverage_threshold=patch_coverage_threshold,
         )
 
-        # Build spatial mask for blending
-        spatial_mask = self._build_spatial_mask(
-            inputs.mask_image,
-            blend_mode=blend_mode,
-            kernel_size=soft_kernel_size,
-        )
+        # Build spatial masks for blending (separate for SS and SLAT)
+        ss_spatial_mask = None
+        slat_spatial_mask = None
+
+        if blend_ss_enabled:
+            ss_spatial_mask = self._build_spatial_mask(
+                inputs.mask_image,
+                blend_mode=ss_blend_mode,
+                kernel_size=ss_soft_kernel,
+            )
+
+        if blend_slat_enabled:
+            slat_spatial_mask = self._build_spatial_mask(
+                inputs.mask_image,
+                blend_mode=slat_blend_mode,
+                kernel_size=slat_soft_kernel,
+            )
 
         # Create hook
         self.hook = PromptToPromptHook(
@@ -110,7 +125,10 @@ class ImageP2PLatentBlendMethod(EditMethod):
             "edit_cond_dict": edit_cond_dict,
             "token_meta": token_meta,
             "stage_configs": stage_configs,
-            "spatial_mask": spatial_mask,
+            "ss_spatial_mask": ss_spatial_mask,
+            "slat_spatial_mask": slat_spatial_mask,
+            "blend_ss_enabled": blend_ss_enabled,
+            "blend_slat_enabled": blend_slat_enabled,
             "blend_strength": blend_strength,
         }
 
@@ -171,7 +189,10 @@ class ImageP2PLatentBlendMethod(EditMethod):
         """
         source_cond_dict = prepared_state["source_cond_dict"]
         edit_cond_dict = prepared_state["edit_cond_dict"]
-        spatial_mask = prepared_state["spatial_mask"]
+        ss_spatial_mask = prepared_state["ss_spatial_mask"]
+        slat_spatial_mask = prepared_state["slat_spatial_mask"]
+        blend_ss_enabled = prepared_state["blend_ss_enabled"]
+        blend_slat_enabled = prepared_state["blend_slat_enabled"]
         blend_strength = prepared_state["blend_strength"]
 
         # Get sampler params
@@ -213,26 +234,38 @@ class ImageP2PLatentBlendMethod(EditMethod):
             sampler_params=slat_params,
         )
 
-        # Step 3: Blend SLAT features based on mask
-        print(f"Blending SLAT features (strength={blend_strength})...")
-        resolution = pipeline.sparse_structure_sampler_params.get("grid_size", 64)
-        blended_slat = self._blend_slat_features(
-            source_slat=source_slat,
-            edit_slat=edit_slat,
-            source_coords=source_coords,
-            edit_coords=edit_coords,
-            spatial_mask=spatial_mask,
-            blend_strength=blend_strength,
-            resolution=resolution,
-            device=pipeline.device,
-        )
-
-        # Use edit coords as base (could also blend coords, but simpler to use edit)
+        # Step 3: Blend sparse structure if enabled
         final_coords = edit_coords
+        if blend_ss_enabled and ss_spatial_mask is not None:
+            print(f"Blending sparse structure coordinates...")
+            # For coords, we can't really blend - just use edit coords
+            # The blending happens at the feature level (SLAT)
+            final_coords = edit_coords
+        else:
+            final_coords = edit_coords
 
-        # Step 4: Decode blended result
+        # Step 4: Blend SLAT features if enabled
+        final_slat = edit_slat
+        if blend_slat_enabled and slat_spatial_mask is not None:
+            print(f"Blending SLAT features (strength={blend_strength})...")
+            resolution = pipeline.sparse_structure_sampler_params.get("grid_size", 64)
+            final_slat = self._blend_slat_features(
+                source_slat=source_slat,
+                edit_slat=edit_slat,
+                source_coords=source_coords,
+                edit_coords=edit_coords,
+                spatial_mask=slat_spatial_mask,
+                blend_strength=blend_strength,
+                resolution=resolution,
+                device=pipeline.device,
+            )
+        else:
+            print("SLAT blending disabled, using edit SLAT")
+            final_slat = edit_slat
+
+        # Step 5: Decode blended result
         print("Decoding blended result...")
-        outputs = pipeline.decode_slat(blended_slat, ["mesh", "gaussian"])
+        outputs = pipeline.decode_slat(final_slat, ["mesh", "gaussian"])
 
         # Also decode source for comparison
         source_outputs = pipeline.decode_slat(source_slat, ["mesh", "gaussian"])
@@ -443,10 +476,14 @@ class ImageP2PLatentBlendMethod(EditMethod):
             "slat_strength": 1.0,
             "patch_coverage_threshold": 0.0,
             "query_chunk": 1024,
-            # Latent blending params
-            "blend_mode": "soft",  # "hard" or "soft"
-            "soft_kernel_size": 5,
-            "blend_strength": 1.0,
+            # Latent blending params - two stages independently controlled
+            "blend_ss_enabled": False,  # Sparse structure blending (usually not needed)
+            "blend_slat_enabled": True,  # SLAT blending (main feature)
+            "ss_blend_mode": "hard",  # "hard" or "soft" for sparse structure
+            "slat_blend_mode": "soft",  # "hard" or "soft" for SLAT
+            "ss_soft_kernel_size": 3,  # Kernel size for SS soft mask
+            "slat_soft_kernel_size": 5,  # Kernel size for SLAT soft mask
+            "blend_strength": 1.0,  # Overall blending strength
             # Output params
             "skip_render": True,
             "skip_glb": False,
