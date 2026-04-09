@@ -181,6 +181,8 @@ class ImageUniEditP2PHybridMethod(EditMethod):
         Returns:
             EditMethodOutputs with results
         """
+        from trellis.modules import sparse as sp
+
         # Extract prepared state
         source_coords = prepared_state["source_coords"]
         source_slat = prepared_state["source_slat"]
@@ -230,12 +232,6 @@ class ImageUniEditP2PHybridMethod(EditMethod):
 
         # Stage 1: Edit sparse structure with UniEdit
         print("Stage 1: Editing sparse structure with UniEdit...")
-        ss_projected_noise = project_sparse_terminal_noise(
-            terminal_noise=ss_terminal_noise,
-            source_coords=source_coords,
-            mask_coords=mask_coords,
-            device=pipeline.device,
-        )
 
         # Build replace index map for stage 1
         replace_index_map = build_sparse_replace_index_map(
@@ -252,7 +248,7 @@ class ImageUniEditP2PHybridMethod(EditMethod):
             cond_src={"cond": source_cond, "neg_cond": neg_cond},
             cond_tgt={"cond": edit_cond, "neg_cond": neg_cond},
             terminal_noise_src=ss_terminal_noise,
-            terminal_noise_tgt=ss_projected_noise,
+            terminal_noise_tgt=ss_terminal_noise,  # Use same noise, no projection needed
             replace_index_map=replace_index_map,
             omega=ss_omega,
             steps=ss_params["steps"],
@@ -269,7 +265,7 @@ class ImageUniEditP2PHybridMethod(EditMethod):
             mask_coords=mask_coords,
         )
 
-        del ss_terminal_noise, ss_projected_noise, coords_tgt
+        del ss_terminal_noise, coords_tgt
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

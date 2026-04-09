@@ -25,10 +25,11 @@ class EditMethodInputs:
     source_image: Optional[Image.Image] = None
     edit_image: Optional[Image.Image] = None
     mask_image: Optional[Image.Image] = None
+    mask_glb_path: Optional[Path] = None
+    source_model_path: Optional[Path] = None
+    asset_dir: Optional[Path] = None
     source_voxels_path: Optional[Path] = None
     source_features_path: Optional[Path] = None
-    mask_glb_path: Optional[Path] = None
-    asset_dir: Optional[Path] = None
     extra_inputs: Optional[Dict[str, Any]] = None
 
 
