@@ -472,10 +472,6 @@ class ImageP2PLatentBlendMethod(EditMethod):
                 pred_v = model(sample, t_tensor, cond_dict["cond"])
                 sample = sample + (t_next - t_curr) * pred_v
 
-                # Clear cache every few steps
-                if i % 5 == 0:
-                    torch.cuda.empty_cache()
-
         return latent_cache
 
     def _rf_solver_inversion_slat(

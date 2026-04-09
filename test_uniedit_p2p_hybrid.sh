@@ -19,8 +19,8 @@ echo "=========================================="
 echo "Testing image_uniedit_p2p_hybrid method"
 echo "=========================================="
 
-# 使用 outputs/source_assets_test0 中的预生成资产
-SOURCE_MODEL="outputs/source_assets_test0"
+# 使用 outputs/source_assets_test0_multiview 中的预生成资产（新格式）
+SOURCE_MODEL="outputs/source_assets_test0_multiview"
 SOURCE_IMAGE="assets/edit_example/images/2d_render.png"
 EDIT_IMAGE="assets/edit_example/images/2d_edit.png"
 MASK_IMAGE="assets/edit_example/images/2d_mask.png"
@@ -54,7 +54,7 @@ echo ""
 
 python run_edit_experiment.py \
   --method image_uniedit_p2p_hybrid \
-  --source-model "$SOURCE_MODEL" \
+  --asset-dir "$SOURCE_MODEL" \
   --source-image "$SOURCE_IMAGE" \
   --edit-image "$EDIT_IMAGE" \
   --mask-image "$MASK_IMAGE" \

@@ -26,7 +26,7 @@ python run_edit_experiment.py \
   --source-image "$SOURCE_IMAGE" \
   --edit-image "$EDIT_IMAGE" \
   --mask-image "$MASK_IMAGE" \
-  --source-model "$SOURCE_MODEL" \
+  --asset-dir "$SOURCE_MODEL" \
   --mask-glb "$MASK_GLB" \
   --case-name "${CASE_NAME}_latent_replace_union_optimized" \
   --seed $SEED \

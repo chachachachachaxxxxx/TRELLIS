@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 from PIL import Image
 
@@ -76,6 +77,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mask-glb", default="", help="Override 3D edit mask GLB/GLTF.")
     parser.add_argument("--source-prompt", default="", help="Override source text prompt.")
     parser.add_argument("--edit-prompt", default="", help="Override edit text prompt.")
+    parser.add_argument("--ss-steps", type=int, default=None, help="Override sparse structure sampling steps (default: 25).")
+    parser.add_argument("--slat-steps", type=int, default=None, help="Override SLAT sampling steps (default: 25).")
     parser.add_argument(
         "--init-case",
         default="",
@@ -153,6 +156,8 @@ def run_method_class(
     skip_glb: bool,
     skip_ply: bool,
     extra_args: list,
+    ss_steps: Optional[int] = None,
+    slat_steps: Optional[int] = None,
 ) -> int:
     """Run method using method class (new way).
 
@@ -246,11 +251,22 @@ def run_method_class(
                 except ValueError:
                     extra_params[key] = value
 
+    # Build sampler params
+    sparse_structure_sampler_params = {}
+    if ss_steps is not None:
+        sparse_structure_sampler_params["steps"] = ss_steps
+
+    slat_sampler_params = {}
+    if slat_steps is not None:
+        slat_sampler_params["steps"] = slat_steps
+
     # Build config
     config = EditMethodConfig(
         method_name=method_spec.name,
         seed=effective_seed,
         num_samples=1,
+        sparse_structure_sampler_params=sparse_structure_sampler_params if sparse_structure_sampler_params else None,
+        slat_sampler_params=slat_sampler_params if slat_sampler_params else None,
         extra_params=extra_params,
     )
 
@@ -378,6 +394,8 @@ def main() -> int:
             skip_glb=bool(args.skip_glb),
             skip_ply=bool(args.skip_ply),
             extra_args=extra_args,
+            ss_steps=args.ss_steps,
+            slat_steps=args.slat_steps,
         )
 
     # Fallback to script-based execution (legacy)

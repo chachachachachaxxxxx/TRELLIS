@@ -66,7 +66,7 @@ echo ">>> 测试 2/6: image_slat_xor_fusion"
 echo "预计时间: ~2 分钟"
 CUDA_VISIBLE_DEVICES=$GPU python run_edit_experiment.py \
   --method image_slat_xor_fusion \
-  --source-model "$SOURCE_MODEL" \
+  --asset-dir "$SOURCE_MODEL" \
   --edit-image "$EDIT_IMAGE" \
   --case-name "$CASE_NAME" \
   --seed $SEED
@@ -85,7 +85,7 @@ echo ">>> 测试 3/6: image_prompt_to_prompt_rf_inversion"
 echo "预计时间: ~4 分钟"
 CUDA_VISIBLE_DEVICES=$GPU python run_edit_experiment.py \
   --method image_prompt_to_prompt_rf_inversion \
-  --source-model "$SOURCE_MODEL" \
+  --asset-dir "$SOURCE_MODEL" \
   --source-image "$SOURCE_IMAGE" \
   --edit-image "$EDIT_IMAGE" \
   --mask-image "$MASK_IMAGE" \
@@ -110,7 +110,7 @@ if [ ! -f "$MASK_GLB" ]; then
 else
     conda run -n hammer bash -c "ATTN_BACKEND=flash_attn CUDA_VISIBLE_DEVICES=$GPU python run_edit_experiment.py \
       --method image_uniedit_rf_inversion \
-      --source-model '$SOURCE_MODEL' \
+      --asset-dir '$SOURCE_MODEL' \
       --source-image '$SOURCE_IMAGE' \
       --edit-image '$EDIT_IMAGE' \
       --mask-glb '$MASK_GLB' \
@@ -138,7 +138,7 @@ if [ ! -f "$MASK_GLB" ]; then
 else
     conda run -n hammer bash -c "ATTN_BACKEND=flash_attn CUDA_VISIBLE_DEVICES=$GPU python run_edit_experiment.py \
       --method image_uniedit_rf_inversion \
-      --source-model '$SOURCE_MODEL' \
+      --asset-dir '$SOURCE_MODEL' \
       --source-image '$SOURCE_IMAGE' \
       --edit-image '$EDIT_IMAGE' \
       --mask-glb '$MASK_GLB' \
@@ -166,7 +166,7 @@ if [ ! -f "$MASK_GLB" ]; then
 else
     conda run -n hammer bash -c "ATTN_BACKEND=flash_attn CUDA_VISIBLE_DEVICES=$GPU python run_edit_experiment.py \
       --method image_uniedit_rf_inversion \
-      --source-model '$SOURCE_MODEL' \
+      --asset-dir '$SOURCE_MODEL' \
       --source-image '$SOURCE_IMAGE' \
       --edit-image '$EDIT_IMAGE' \
       --mask-glb '$MASK_GLB' \

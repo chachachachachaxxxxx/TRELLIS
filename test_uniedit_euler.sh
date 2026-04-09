@@ -36,7 +36,7 @@ python run_edit_experiment.py \
   --source-image "$SOURCE_IMAGE" \
   --edit-image "$EDIT_IMAGE" \
   --mask-glb "$MASK_GLB" \
-  --source-model "$SOURCE_MODEL" \
+  --asset-dir "$SOURCE_MODEL" \
   --case-name "$CASE_NAME" \
   --seed "$SEED" \
   --preprocess \

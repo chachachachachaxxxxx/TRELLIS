@@ -1,25 +1,28 @@
 #!/bin/bash
-
-# 简化测试：只测试一个配置
-# Soft mask (kernel=5) with full blend strength
+# Quick test: P2P Latent Blend with SS blending only (faster)
 
 set -e
 
-# 激活 hammer 环境
 source ~/miniforge3/etc/profile.d/conda.sh
 conda activate hammer
 
-CASE_NAME="p2p_blend_quick_test_hard2"
+CASE_NAME="p2p_blend_quick_5"
 SEED=1
-GPU=3
+GPU=2
 SOURCE_MODEL="outputs/source_assets_test0_multiview"
 
 export CUDA_VISIBLE_DEVICES=$GPU
 export SPCONV_ALGO=native
+export HTTP_PROXY=http://127.0.0.1:7890
+export HTTPS_PROXY=http://127.0.0.1:7890
 
 echo "=========================================="
-echo "Quick test: image_p2p_latent_blend"
-echo "Configuration: soft mask (kernel=5)"
+echo "Quick Test: image_p2p_latent_blend"
+echo "SS blending: ON"
+echo "SLAT blending: ON"
+echo "Inversion: simple Euler"
+echo "Steps: 25 (reduced for speed)"
+echo "GPU: CUDA $GPU"
 echo "=========================================="
 
 python run_edit_experiment.py \
@@ -29,10 +32,14 @@ python run_edit_experiment.py \
   --edit-image assets/edit_example/images/2d_edit.png \
   --mask-image assets/edit_example/images/2d_mask.png \
   --case-name "$CASE_NAME" \
+  --mask-glb assets/edit_example/mask.glb \
   --seed $SEED \
   --preprocess \
   --ss-steps 25 \
-  --slat-steps 25 
+  --slat-steps 25 \
+  --extra-param blend_ss_enabled=true \
+  --extra-param blend_slat_enabled=true \
+  --extra-param inversion_mode=simple 
 
 if [ $? -eq 0 ]; then
     echo ""
