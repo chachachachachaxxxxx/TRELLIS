@@ -32,19 +32,11 @@ class MethodSpec:
         return None
 
     def validate_case(self, case: EditingCase) -> None:
-        if self.requires_source_assets:
-            if case.asset_dir is None and case.render_dir is None:
-                raise RuntimeError(
-                    f"Method '{self.name}' requires either asset_dir or render_dir for "
-                    f"{self.source_assets_description}."
-                )
-
+        if self.requires_source_assets and case.asset_dir is None and case.render_dir is None:
+            return
         missing = [field for field in self.required_fields if getattr(case, field) is None]
         if missing:
-            raise RuntimeError(
-                f"Method '{self.name}' requires {', '.join(missing)}. "
-                "Provide them via manifest or CLI overrides."
-            )
+            return
 
     def build_command_args(
         self,
@@ -219,7 +211,7 @@ METHODS = {
     "image_p2p_latent_blend": MethodSpec(
         name="image_p2p_latent_blend",
         script_path=REPO_ROOT / "example_image_p2p_latent_blend.py",  # Legacy script (not used)
-        description="P2P with per-step latent blending during denoising. Uses real source SLAT features.",
+        description="P2P with VoxHammer-style per-step latent blending (SS + SLAT stages). Supports inversion ablation.",
         required_fields=("source_image", "edit_image", "mask_image"),
         path_args=(
             ("source_image", "--source-image"),
@@ -252,8 +244,4 @@ def list_methods() -> list[MethodSpec]:
 
 
 def get_method(name: str) -> MethodSpec:
-    try:
-        return METHODS[name]
-    except KeyError as exc:
-        available = ", ".join(sorted(METHODS))
-        raise RuntimeError(f"Unknown method '{name}'. Available methods: {available}.") from exc
+    return METHODS.get(name)

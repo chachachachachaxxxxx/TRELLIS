@@ -125,8 +125,6 @@ def denoise_sparse_structure(
     )
     voxel = decoder(z_tgt)
     coords = torch.argwhere(voxel > 0)[:, [0, 2, 3, 4]].int()
-    if coords.shape[0] == 0:
-        raise RuntimeError("Denoised sparse structure is empty")
     return coords
 
 

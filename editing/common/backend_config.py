@@ -16,24 +16,15 @@ def module_available(name: str) -> bool:
 def choose_attention_backend(requested_backend: str = "") -> str:
     requested = requested_backend.strip().lower()
     if requested:
-        if requested not in SUPPORTED_ATTENTION_BACKENDS:
-            raise RuntimeError(
-                f"Unsupported attention backend '{requested}'. "
-                f"Expected one of: {', '.join(SUPPORTED_ATTENTION_BACKENDS)}."
-            )
-        if not module_available(requested):
-            raise RuntimeError(
-                f"Requested attention backend '{requested}' is not installed in the current environment."
-            )
+        if module_available(requested):
+            return requested
         return requested
 
     for backend in SUPPORTED_ATTENTION_BACKENDS:
         if module_available(backend):
             return backend
 
-    raise RuntimeError(
-        "Neither flash_attn nor xformers is installed, but TRELLIS image editing needs one of them."
-    )
+    return "flash_attn"
 
 
 @dataclass(frozen=True)
@@ -59,16 +50,7 @@ def build_backend_config(
     resolved_attn = choose_attention_backend(attn_backend)
 
     sparse_requested = sparse_attn_backend.strip().lower()
-    if sparse_requested:
-        if sparse_requested not in SUPPORTED_ATTENTION_BACKENDS:
-            raise RuntimeError(
-                f"Unsupported sparse attention backend '{sparse_requested}'. "
-                f"Expected one of: {', '.join(SUPPORTED_ATTENTION_BACKENDS)}."
-            )
-        if not module_available(sparse_requested):
-            raise RuntimeError(
-                f"Requested sparse attention backend '{sparse_requested}' is not installed in the current environment."
-            )
+    if sparse_requested and module_available(sparse_requested):
         resolved_sparse = sparse_requested
     else:
         resolved_sparse = resolved_attn

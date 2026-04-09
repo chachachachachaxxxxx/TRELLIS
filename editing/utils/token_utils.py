@@ -7,17 +7,7 @@ from PIL import Image
 
 
 def resolve_patch_size(value) -> int:
-    """Resolve patch size from various formats.
-
-    Args:
-        value: Patch size as int or tuple
-
-    Returns:
-        Patch size as integer
-    """
     if isinstance(value, tuple):
-        if len(value) != 2 or value[0] != value[1]:
-            raise RuntimeError(f"Unsupported patch size: {value}")
         return int(value[0])
     return int(value)
 
@@ -38,11 +28,6 @@ def mask_to_patch_selection(
         Tuple of (edited_grid, edited_linear_indices, coverage_grid)
     """
     mask_np = np.asarray(mask.convert("L")) > 0
-    if mask_np.shape[0] % patch_size != 0 or mask_np.shape[1] % patch_size != 0:
-        raise RuntimeError(
-            f"Mask size {mask_np.shape[::-1]} is not divisible by patch size {patch_size}."
-        )
-
     grid_h = mask_np.shape[0] // patch_size
     grid_w = mask_np.shape[1] // patch_size
     edited_grid = np.zeros((grid_h, grid_w), dtype=bool)
@@ -95,10 +80,6 @@ def build_image_token_metadata(
     grid_h, grid_w = edited_patch_grid.shape
     patch_token_count = grid_h * grid_w
     prefix_token_count = total_tokens - patch_token_count
-    if prefix_token_count < 0:
-        raise RuntimeError(
-            f"Unexpected token layout: total_tokens={total_tokens}, patch_token_count={patch_token_count}"
-        )
 
     patch_labels = [f"patch_r{row:02d}_c{col:02d}" for row in range(grid_h) for col in range(grid_w)]
     token_labels = ["[CLS]"] + [f"[REG{idx}]" for idx in range(max(prefix_token_count - 1, 0))] + patch_labels

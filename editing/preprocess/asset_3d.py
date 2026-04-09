@@ -262,9 +262,6 @@ def load_mask_glb_coords(
     # Load generated voxels
     coords = ply_to_coords(voxels_delete_path, device, resolution)
 
-    if coords.shape[0] == 0:
-        raise RuntimeError("VoxHammer mask filtering produced no occupied voxels.")
-
     meta = {
         "mask_glb": str(mask_path),
         "enabled": True,
@@ -277,26 +274,15 @@ def load_mask_glb_coords(
 
 
 def coords_to_flat_indices(coords: torch.Tensor, resolution: int = 64) -> torch.Tensor:
-    """Convert 3D/4D coordinates to flat indices for lookup.
-
-    Args:
-        coords: Nx3 or Nx4 tensor of coordinates
-        resolution: Voxel grid resolution
-
-    Returns:
-        N tensor of flat indices
-    """
     coords = coords.long()
     if coords.shape[1] == 3:
         return coords[:, 0] * resolution * resolution + coords[:, 1] * resolution + coords[:, 2]
-    if coords.shape[1] == 4:
-        return (
-            coords[:, 0] * resolution * resolution * resolution
-            + coords[:, 1] * resolution * resolution
-            + coords[:, 2] * resolution
-            + coords[:, 3]
-        )
-    raise RuntimeError(f"Unsupported coordinate shape: {tuple(coords.shape)}")
+    return (
+        coords[:, 0] * resolution * resolution * resolution
+        + coords[:, 1] * resolution * resolution
+        + coords[:, 2] * resolution
+        + coords[:, 3]
+    )
 
 
 def sparse_batch_slice(sparse_tensor, batch_idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -320,24 +306,6 @@ def project_sparse_terminal_noise(
     SparseTensor,
     resolution: int = 64,
 ):
-    """Project source terminal noise onto target coordinates.
-
-    For RF inversion: maps source noise features to new target structure,
-    filling unmatched voxels with random noise.
-
-    Args:
-        source_noise: Source SparseTensor with terminal noise
-        target_coords: Target Nx4 coordinates (batch, x, y, z)
-        device: Target torch device
-        SparseTensor: SparseTensor class from trellis
-        resolution: Voxel grid resolution
-
-    Returns:
-        SparseTensor with projected features
-    """
-    if target_coords.numel() == 0:
-        raise RuntimeError("Sparse-structure denoising produced no target voxels, so SLAT projection cannot continue.")
-
     batch_size = int(target_coords[:, 0].max().item()) + 1 if target_coords.numel() > 0 else 1
     feature_dim = source_noise.feats.shape[1]
     all_coords = []

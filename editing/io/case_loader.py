@@ -111,8 +111,6 @@ def _load_case_manifest(case_ref: str | Path | None) -> tuple[Path, Path | None,
         return cwd, None, None, {}, False
 
     resolved = Path(case_ref).expanduser().resolve()
-    if not resolved.exists():
-        raise RuntimeError(f"case does not exist: {resolved}")
 
     if resolved.is_file():
         manifest_path = resolved

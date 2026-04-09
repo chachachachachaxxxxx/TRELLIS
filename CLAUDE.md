@@ -7,6 +7,7 @@
 - **重构状态**: `docs/REFACTORING_STATUS.md` - 编辑实验框架重构的完整状态报告
 - **迁移指南**: `docs/METHOD_MIGRATION_GUIDE.md` - 如何迁移和添加新方法
 - **测试报告**: `docs/REFACTORING_TEST_REPORT.md` - 测试结果和验证状态
+- **反演测试**: `docs/INVERSION_TESTING.md` - 反演质量测试框架说明
 
 ## 环境
 
@@ -44,6 +45,12 @@
 - 修改共享模块（`trellis/modules/`、`trellis/models/`）时，注意会同时影响推理、训练和编辑脚本
 - 不要动 `trellis/representations/mesh/flexicubes`（git submodule），除非明确要求
 
+### 代码风格
+
+- 保持代码简洁，不要提前抽象
+- 不要写异常处理，不使用 `raise`、`try`、`catch`、`finally` 进行异常处理
+- 让代码在遇到问题时自然失败，依赖 Python 的默认错误机制
+
 ## 代码定位
 
 | 任务 | 入口文件 |
@@ -57,6 +64,7 @@
 | 网络、attention | `trellis/models/`、`trellis/modules/` |
 | **编辑实验框架** | `editing/` - 统一的编辑方法框架 |
 | **编辑方法运行** | `run_edit_experiment.py` - 统一入口 |
+| **反演质量测试** | `test_inversion_quality.py` - 反演测试入口 |
 
 ## 编辑实验框架（新）
 

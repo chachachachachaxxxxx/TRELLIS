@@ -169,9 +169,6 @@ class SparseLatentReplaceRFSolver(RFSolverSampler):
             # Replace latents before sampling (preserve source regions)
             if replace_target_indices.numel() > 0:
                 cached_latent = latent_cache.get(_time_key(t_curr))
-                if cached_latent is None:
-                    raise RuntimeError(f"Missing cached Stage-2 latent for timestep {t_curr}.")
-
                 # Load from CPU and replace
                 sample = apply_sparse_latent_replacement(
                     sample=sample,

@@ -58,7 +58,7 @@ class EditMethodRunner:
             source_voxels_path: Path to source voxels.ply (for RF inversion)
             source_features_path: Path to source features.npz (for RF inversion)
             mask_glb_path: Path to 3D mask GLB (for UniEdit)
-            asset_dir: Asset directory (for RF inversion)
+            asset_dir: Asset directory (preprocessed 3D assets)
             extra_inputs: Extra inputs (e.g., prompts for text methods)
 
         Returns:
@@ -137,38 +137,34 @@ class EditMethodRunner:
 
         write_json(out_dir / "config.json", config_dict)
 
-        try:
-            # Prepare method
-            prepared_state = self.method.prepare(self.pipeline, method_inputs, config)
+        # Prepare method
+        prepared_state = self.method.prepare(self.pipeline, method_inputs, config)
 
-            # Run method
-            outputs = self.method.run(self.pipeline, prepared_state, config)
+        # Run method
+        outputs = self.method.run(self.pipeline, prepared_state, config)
 
-            # Offload pipeline models to CPU before GLB export to free GPU memory
-            from editing.common.save_utils import offload_models_to_cpu
-            offload_models_to_cpu(self.pipeline)
+        # Offload pipeline models to CPU before GLB export to free GPU memory
+        from editing.common.save_utils import offload_models_to_cpu
+        offload_models_to_cpu(self.pipeline)
 
-            # Save artifacts
-            artifact_paths = self.method.save_artifacts(outputs, out_dir, config)
+        # Save artifacts
+        artifact_paths = self.method.save_artifacts(outputs, out_dir, config)
 
-            # Save source reconstruction if requested
-            if not skip_source and outputs.source_outputs is not None:
-                ensure_dir(source_out_dir)
-                self._save_source_outputs(outputs.source_outputs, source_out_dir)
+        # Save source reconstruction if requested
+        if not skip_source and outputs.source_outputs is not None:
+            ensure_dir(source_out_dir)
+            self._save_source_outputs(outputs.source_outputs, source_out_dir)
 
-            # Save metadata
-            if outputs.metadata:
-                write_json(out_dir / "method_metadata.json", outputs.metadata)
+        # Save metadata
+        if outputs.metadata:
+            write_json(out_dir / "method_metadata.json", outputs.metadata)
 
-            print(f"✓ Edit results saved to: {out_dir}")
-            if not skip_source and outputs.source_outputs is not None:
-                print(f"✓ Source results saved to: {source_out_dir}")
+        print(f"✓ Edit results saved to: {out_dir}")
+        if not skip_source and outputs.source_outputs is not None:
+            print(f"✓ Source results saved to: {source_out_dir}")
 
-            return outputs
-
-        finally:
-            # Always cleanup
-            self.method.cleanup()
+        self.method.cleanup()
+        return outputs
 
     def _save_source_outputs(self, source_outputs, out_dir: Path):
         """Save source reconstruction outputs."""

@@ -49,13 +49,8 @@ def generate_source_assets_from_model(
     Note:
         Requires: temp/bpy_render.py and temp/extract_feature.py
     """
-    try:
-        from editing.rendering import render_3d_model
-        from editing.preprocess.feature_extraction import extract_features
-    except ImportError:
-        raise ImportError(
-            "Multi-view rendering requires editing.rendering and editing.preprocess.feature_extraction modules."
-        )
+    from editing.rendering import render_3d_model
+    from editing.preprocess.feature_extraction import extract_features
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -265,35 +260,22 @@ def ensure_source_assets(
 
     # Determine generation method
     if method == "auto":
-        if source_model is not None:
-            method = "multi_view"
-        elif source_image is not None:
-            method = "trellis_sampling"
-        else:
-            raise FileNotFoundError(
-                f"Source assets not found in {asset_dir} and neither source_model nor source_image provided"
-            )
+        method = "multi_view" if source_model is not None else "trellis_sampling"
 
     # Generate assets
     if method == "multi_view":
-        if source_model is None:
-            raise ValueError("source_model is required for multi_view method")
         result = generate_source_assets_from_model(
             model_path=source_model,
             output_dir=asset_dir,
             **generation_kwargs,
         )
-    elif method == "trellis_sampling":
-        if source_image is None:
-            raise ValueError("source_image is required for trellis_sampling method")
+    else:
         result = generate_source_assets_from_image(
             pipeline=pipeline,
             source_image=source_image,
             output_dir=asset_dir,
             **generation_kwargs,
         )
-    else:
-        raise ValueError(f"Invalid method: {method}. Must be 'auto', 'multi_view', or 'trellis_sampling'")
 
     result["generated"] = True
     return result
