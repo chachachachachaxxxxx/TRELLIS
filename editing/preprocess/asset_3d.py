@@ -30,32 +30,9 @@ class MaskGLBResult:
 
 
 def load_ply_positions(ply_path: Path) -> np.ndarray:
-    """Load vertex positions from a PLY file.
-
-    Tries utils3d first, falls back to trimesh.
-
-    Args:
-        ply_path: Path to PLY file
-
-    Returns:
-        Nx3 array of vertex positions
-    """
-    try:
-        import utils3d  # type: ignore
-
-        position = utils3d.io.read_ply(str(ply_path))[0]
-        return np.asarray(position, dtype=np.float32)
-    except Exception:
-        mesh = trimesh.load(str(ply_path), process=False)
-        if hasattr(mesh, "vertices"):
-            vertices = np.asarray(mesh.vertices, dtype=np.float32)
-        elif isinstance(mesh, trimesh.points.PointCloud):
-            vertices = np.asarray(mesh.vertices, dtype=np.float32)
-        else:
-            raise RuntimeError(f"Unsupported PLY payload in {ply_path}")
-        if vertices.ndim != 2 or vertices.shape[1] != 3:
-            raise RuntimeError(f"Expected Nx3 vertices in {ply_path}, got shape {vertices.shape}")
-        return vertices
+    import utils3d  # type: ignore
+    position = utils3d.io.read_ply(str(ply_path))[0]
+    return np.asarray(position, dtype=np.float32)
 
 
 def ply_to_coords(ply_path: Path, device: torch.device, resolution: int = 64) -> torch.Tensor:
@@ -97,31 +74,52 @@ def coords_to_voxel(coords: torch.Tensor, device: torch.device, resolution: int 
 def feats_to_slat(pipeline, feats_path: Path, SparseTensor):
     """Load SLAT features from features.npz and encode them.
 
+    Supports two formats:
+    1. New format (patch tokens): 'patchtokens' + 'indices' - needs encoding
+    2. Old format (encoded SLAT): 'feats' + 'coords' - already encoded
+
     Args:
         pipeline: TRELLIS pipeline with slat_encoder model
         feats_path: Path to features.npz file
         SparseTensor: SparseTensor class from trellis
 
     Returns:
-        Encoded SLAT features
+        Encoded SLAT features (SparseTensor)
     """
     feats = np.load(feats_path)
-    if "patchtokens" not in feats or "indices" not in feats:
-        raise RuntimeError(
-            f"features.npz must contain 'patchtokens' and 'indices', got keys: {list(feats.keys())}"
+
+    # Check format and load accordingly
+    if "patchtokens" in feats and "indices" in feats:
+        # New format: patch tokens that need encoding
+        sparse_tensor = SparseTensor(
+            feats=torch.from_numpy(feats["patchtokens"]).float().to(pipeline.device),
+            coords=torch.cat(
+                [
+                    torch.zeros(feats["patchtokens"].shape[0], 1, dtype=torch.int32),
+                    torch.from_numpy(feats["indices"]).int(),
+                ],
+                dim=1,
+            ).to(pipeline.device),
         )
-    sparse_tensor = SparseTensor(
-        feats=torch.from_numpy(feats["patchtokens"]).float().to(pipeline.device),
-        coords=torch.cat(
-            [
-                torch.zeros(feats["patchtokens"].shape[0], 1, dtype=torch.int32),
-                torch.from_numpy(feats["indices"]).int(),
-            ],
-            dim=1,
-        ).to(pipeline.device),
-    )
-    feats_encoder = pipeline.models["slat_encoder"]
-    return feats_encoder(sparse_tensor, sample_posterior=False)
+        feats_encoder = pipeline.models["slat_encoder"]
+        return feats_encoder(sparse_tensor, sample_posterior=False)
+
+    elif "feats" in feats and "coords" in feats:
+        # Old format: already encoded SLAT features
+        # coords shape: (N, 4) with batch index in first column
+        # feats shape: (N, 8) - encoded SLAT features
+        slat_tensor = SparseTensor(
+            feats=torch.from_numpy(feats["feats"]).float().to(pipeline.device),
+            coords=torch.from_numpy(feats["coords"]).int().to(pipeline.device),
+        )
+        return slat_tensor
+
+    else:
+        slat_tensor = SparseTensor(
+            feats=torch.from_numpy(feats["feats"]).float().to(pipeline.device),
+            coords=torch.from_numpy(feats["coords"]).int().to(pipeline.device),
+        )
+        return slat_tensor
 
 
 def load_source_voxel_normalization(asset_dir: Path) -> VoxelNormalization:
@@ -140,8 +138,6 @@ def load_source_voxel_normalization(asset_dir: Path) -> VoxelNormalization:
     payload = json.loads(transforms_path.read_text())
     scale = float(payload["scale"])
     offset_raw = payload["offset"]
-    if not isinstance(offset_raw, Sequence) or len(offset_raw) != 3:
-        raise RuntimeError(f"Invalid offset field in {transforms_path}: {offset_raw!r}")
     offset = np.asarray(offset_raw, dtype=np.float32)
 
     return VoxelNormalization(
@@ -152,87 +148,33 @@ def load_source_voxel_normalization(asset_dir: Path) -> VoxelNormalization:
     )
 
 
-def _load_mask_mesh(
-    mask_glb: str,
-    source_normalization: Optional[VoxelNormalization] = None,
-    ensure_path_exists_fn=None,
-) -> Tuple[Optional[trimesh.Trimesh], dict]:
-    """Load and validate a 3D mask mesh from GLB.
+
+
+def glb_to_ply(input_glb_path: str, output_ply_path: str) -> None:
+    """Convert GLB to PLY using Blender Python API.
+
+    This ensures coordinate system consistency with SLAT encoder voxels.
 
     Args:
-        mask_glb: Path to mask GLB file
-        source_normalization: Optional normalization to apply
-        ensure_path_exists_fn: Function to validate path exists
-
-    Returns:
-        Tuple of (mesh, metadata dict)
+        input_glb_path: Path to input GLB file
+        output_ply_path: Path to output PLY file
     """
-    mask_glb = mask_glb.strip()
-    if not mask_glb:
-        return None, {"mask_glb": None, "enabled": False}
+    import bpy
 
-    if ensure_path_exists_fn is not None:
-        mask_path = ensure_path_exists_fn(Path(mask_glb).expanduser().resolve(), "mask_glb")
-    else:
-        mask_path = Path(mask_glb).expanduser().resolve()
-        if not mask_path.exists():
-            raise RuntimeError(f"mask_glb does not exist: {mask_path}")
+    # Clear scene
+    bpy.ops.object.select_all(action="SELECT")
+    bpy.ops.object.delete(use_global=False)
+    bpy.context.scene.render.engine = "CYCLES"
 
-    loaded = trimesh.load(str(mask_path), process=False)
-    if isinstance(loaded, trimesh.Scene):
-        mesh = loaded.dump(concatenate=True)
-        if not isinstance(mesh, trimesh.Trimesh) or mesh.vertices.shape[0] == 0:
-            raise RuntimeError(f"mask_glb contains no usable triangle mesh after scene concatenation: {mask_path}")
-    elif isinstance(loaded, trimesh.Trimesh):
-        mesh = loaded.copy()
-    else:
-        raise RuntimeError(f"Unsupported mask_glb payload: {type(loaded)}")
+    # Import GLB
+    bpy.ops.import_scene.gltf(filepath=input_glb_path)
 
-    raw_vertices = np.asarray(mesh.vertices, dtype=np.float32)
-    if raw_vertices.ndim != 2 or raw_vertices.shape[1] != 3 or raw_vertices.shape[0] == 0:
-        raise RuntimeError(f"mask_glb must contain valid Nx3 vertices, got shape {raw_vertices.shape}")
-
-    raw_min = raw_vertices.min(axis=0)
-    raw_max = raw_vertices.max(axis=0)
-    transformed = False
-    source_scale = None
-    source_offset = None
-    source_transforms_path = None
-
-    if source_normalization is not None and source_normalization.available:
-        source_scale = float(source_normalization.scale)
-        source_offset = np.asarray(source_normalization.offset, dtype=np.float32)
-        source_transforms_path = str(source_normalization.transforms_path)
-        mesh.vertices = raw_vertices * source_scale + source_offset[None, :]
-        transformed = True
-
-    aligned_vertices = np.asarray(mesh.vertices, dtype=np.float32)
-    aligned_min = aligned_vertices.min(axis=0)
-    aligned_max = aligned_vertices.max(axis=0)
-    if aligned_min.min() < -0.55 or aligned_max.max() > 0.55:
-        normalization_hint = ""
-        if source_transforms_path is not None:
-            normalization_hint = f" Applied source normalization from {source_transforms_path},"
-        else:
-            normalization_hint = " No source voxel-space normalization metadata was found (expected transforms.json beside the render assets),"
-        raise RuntimeError(
-            "mask_glb could not be aligned to TRELLIS voxel space."
-            f"{normalization_hint} got bounds min={aligned_min.tolist()} max={aligned_max.tolist()} for {mask_path}."
-        )
-
-    meta = {
-        "mask_glb": str(mask_path),
-        "enabled": True,
-        "input_coordinate_mode": "source_render_space_to_voxel_space" if transformed else "preserve_input_coordinates",
-        "raw_aabb_min": raw_min.tolist(),
-        "raw_aabb_max": raw_max.tolist(),
-        "voxel_space_aabb_min": aligned_min.tolist(),
-        "voxel_space_aabb_max": aligned_max.tolist(),
-        "source_transforms_path": source_transforms_path,
-        "source_scale": source_scale,
-        "source_offset": source_offset.tolist() if source_offset is not None else None,
-    }
-    return mesh, meta
+    # Export PLY with normals (ASCII format for compatibility)
+    bpy.ops.wm.ply_export(
+        filepath=output_ply_path,
+        export_normals=True,
+        ascii_format=True
+    )
 
 
 def load_mask_glb_coords(
@@ -247,6 +189,7 @@ def load_mask_glb_coords(
 
     Strategy 1: Read pre-generated voxels_delete.ply from asset_dir
     Strategy 2: Load mask GLB and generate voxels via VoxHammer filtering
+                (same approach as process_delete_ply in temp/delete_region_voxel.py)
 
     Args:
         mask_glb: Path to mask GLB file
@@ -259,73 +202,78 @@ def load_mask_glb_coords(
     Returns:
         MaskGLBResult with coords, mesh, and metadata
     """
+    # Auto-load source normalization from asset_dir if not provided
+    if source_normalization is None and asset_dir is not None:
+        source_normalization = load_source_voxel_normalization(asset_dir)
+
     # Strategy 1: read existing voxels_delete.ply
     if asset_dir is not None:
         voxels_delete_path = asset_dir / "voxels_delete.ply"
         if voxels_delete_path.is_file():
             coords = ply_to_coords(voxels_delete_path, device, resolution)
-            mesh, mesh_meta = (None, {})
-            if mask_glb.strip():
-                mesh, mesh_meta = _load_mask_mesh(
-                    mask_glb,
-                    source_normalization=source_normalization,
-                    ensure_path_exists_fn=ensure_path_exists_fn,
-                )
             meta = {
-                **mesh_meta,
                 "mask_source": "voxels_delete_ply",
                 "voxels_delete_path": str(voxels_delete_path),
                 "voxel_count": int(coords.shape[0]),
                 "enabled": True,
             }
-            return MaskGLBResult(coords=coords, mesh=mesh, meta=meta)
+            return MaskGLBResult(coords=coords, mesh=None, meta=meta)
 
-    # Strategy 2: generate via VoxHammer filtering
-    mesh, meta = _load_mask_mesh(
-        mask_glb,
-        source_normalization=source_normalization,
-        ensure_path_exists_fn=ensure_path_exists_fn,
-    )
-    if mesh is None:
-        return MaskGLBResult(coords=None, mesh=None, meta=meta)
+    # Strategy 2: generate via VoxHammer filtering (same as process_delete_ply)
+    # Validate mask_glb path
+    mask_glb = mask_glb.strip()
+    if not mask_glb:
+        return MaskGLBResult(coords=None, mesh=None, meta={"enabled": False})
+
+    if ensure_path_exists_fn is not None:
+        mask_path = ensure_path_exists_fn(Path(mask_glb).expanduser().resolve(), "mask_glb")
+    else:
+        mask_path = Path(mask_glb).expanduser().resolve()
 
     from editing.preprocess.voxel_filtering import process_voxels_with_improved_filtering
 
+    # Use preset grid (same as process_delete_ply)
     preset_voxel_path = "assets/preset/preset_grid64.ply"
     voxel_size = 1.0 / float(resolution)
 
-    tmp_mask_path = tmp_out_path = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".ply", delete=False) as f:
-            tmp_mask_path = f.name
-        with tempfile.NamedTemporaryFile(suffix=".ply", delete=False) as f:
-            tmp_out_path = f.name
-        mesh.export(tmp_mask_path, file_type="ply")
-        process_voxels_with_improved_filtering(
-            preset_voxel_path,
-            tmp_mask_path,
-            tmp_out_path,
-            method="volume",
-            voxel_size=voxel_size,
-            inside=True,
-        )
-        coords = ply_to_coords(Path(tmp_out_path), device, resolution)
-    finally:
-        for p in (tmp_mask_path, tmp_out_path):
-            if p is not None:
-                try:
-                    os.unlink(p)
-                except OSError:
-                    pass
+    # Determine output paths
+    if asset_dir is not None:
+        # Save in asset_dir (persistent)
+        mesh_delete_path = asset_dir / "mesh_delete.ply"
+        voxels_delete_path = asset_dir / "voxels_delete.ply"
+    else:
+        # Use temporary files
+        mesh_delete_path = Path(tempfile.mktemp(suffix="_mesh_delete.ply"))
+        voxels_delete_path = Path(tempfile.mktemp(suffix="_voxels_delete.ply"))
+
+    # Convert GLB to PLY using bpy (same coordinate system as SLAT encoder)
+    glb_to_ply(str(mask_path), str(mesh_delete_path))
+
+    # Apply VoxHammer filtering (same as process_delete_ply)
+    process_voxels_with_improved_filtering(
+        preset_voxel_path,
+        str(mesh_delete_path),
+        str(voxels_delete_path),
+        method="volume",
+        voxel_size=voxel_size,
+        inside=True,
+    )
+
+    # Load generated voxels
+    coords = ply_to_coords(voxels_delete_path, device, resolution)
 
     if coords.shape[0] == 0:
         raise RuntimeError("VoxHammer mask filtering produced no occupied voxels.")
 
-    meta.update({
+    meta = {
+        "mask_glb": str(mask_path),
+        "enabled": True,
         "mask_source": "voxhammer_process_voxels_with_improved_filtering",
         "voxel_count": int(coords.shape[0]),
-    })
-    return MaskGLBResult(coords=coords, mesh=mesh, meta=meta)
+        "mesh_delete_path": str(mesh_delete_path),
+        "voxels_delete_path": str(voxels_delete_path),
+    }
+    return MaskGLBResult(coords=coords, mesh=None, meta=meta)
 
 
 def coords_to_flat_indices(coords: torch.Tensor, resolution: int = 64) -> torch.Tensor:
