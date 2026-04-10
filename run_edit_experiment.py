@@ -191,6 +191,19 @@ def run_method_class(
 
     # Load pipeline
     print(f"Loading pipeline: {effective_model}")
+    print(f"Target device: {device}")
+    print(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')}")
+
+    import torch
+
+    # If CUDA_VISIBLE_DEVICES is set, use cuda:0 (which maps to the visible device)
+    # Otherwise use the specified device
+    if "CUDA_VISIBLE_DEVICES" in os.environ and device.startswith("cuda:"):
+        load_device = "cuda:0"
+        print(f"CUDA_VISIBLE_DEVICES is set, loading to cuda:0 (physical device {os.environ['CUDA_VISIBLE_DEVICES']})")
+    else:
+        load_device = device
+
     if is_text_method:
         from trellis.pipelines import TrellisTextTo3DPipeline
         pipeline = TrellisTextTo3DPipeline.from_pretrained(effective_model)
@@ -199,9 +212,8 @@ def run_method_class(
         pipeline = TrellisImageTo3DPipeline.from_pretrained(effective_model)
 
     # Move pipeline to specified device
-    import torch
-    pipeline.to(torch.device(device))
-    print(f"Pipeline loaded on device: {device}")
+    pipeline.to(torch.device(load_device))
+    print(f"Pipeline loaded on device: {pipeline.device}")
 
     # Load inputs based on method type
     if is_text_method:
