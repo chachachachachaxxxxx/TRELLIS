@@ -39,6 +39,7 @@ preprocess: true
 # 基础参数
 seed: 1
 model: microsoft/TRELLIS-image-large
+device: cuda:0
 
 # 环境配置
 attn_backend: flash-attn
@@ -157,6 +158,7 @@ python run_batch_edit_and_eval.py \
 | `preprocess` | boolean | 是否预处理 |
 | `seed` | integer | 随机种子 |
 | `model` | string | 模型路径或 HF repo |
+| `device` | string | GPU 设备（如 cuda:0, cuda:1）|
 | `attn_backend` | string | 注意力后端 |
 | `spconv_algo` | string | spconv 算法 |
 | `ss_steps` | integer | SS 采样步数 |
