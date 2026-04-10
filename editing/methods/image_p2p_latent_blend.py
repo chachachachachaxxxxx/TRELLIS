@@ -728,6 +728,10 @@ class ImageP2PLatentBlendMethod(EditMethod):
     ) -> EditMethodOutputs:
         """Run P2P with per-step latent blending."""
 
+        # Disable gradients for the entire editing process to save memory
+        # Only enable when specifically needed (e.g., for to_glb texture baking)
+        torch.set_grad_enabled(False)
+
         source_slat = prepared_state["source_slat"]
         source_cond_dict = prepared_state["source_cond_dict"]
         edit_cond_dict = prepared_state["edit_cond_dict"]
@@ -965,6 +969,14 @@ class ImageP2PLatentBlendMethod(EditMethod):
         # Restore original SS sampler
         pipeline.sparse_structure_sampler = original_ss_sampler
 
+        # Clean up SS cache immediately after use
+        if source_ss_latent_cache is not None:
+            del source_ss_latent_cache
+            source_ss_latent_cache = None
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+
         # Step 4: Prepare SLAT blending
         original_slat_sampler = pipeline.slat_sampler
         source_slat_latent_cache = None
@@ -1010,6 +1022,14 @@ class ImageP2PLatentBlendMethod(EditMethod):
         )
         print(f"Edit SLAT: {edit_slat.coords.shape[0]} voxels")
 
+        # Clean up SLAT cache immediately after use
+        if source_slat_latent_cache is not None:
+            del source_slat_latent_cache
+            source_slat_latent_cache = None
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+
         # Print SLAT blending statistics
         if blend_slat_enabled and hasattr(pipeline.slat_sampler, 'stats'):
             stats = pipeline.slat_sampler.stats
@@ -1027,10 +1047,103 @@ class ImageP2PLatentBlendMethod(EditMethod):
         # Restore original SLAT sampler
         pipeline.slat_sampler = original_slat_sampler
 
-        # Step 6: Decode
+        # Step 6: Clean up before decode
+        print("Cleaning up memory before decode...")
+        # Delete cached latents
+        if source_ss_latent_cache is not None:
+            del source_ss_latent_cache
+        if source_slat_latent_cache is not None:
+            del source_slat_latent_cache
+        # Delete intermediate tensors
+        del source_cond_dict, edit_cond_dict
+        if mask_coords is not None:
+            del mask_coords
+
+        # Move source_slat to CPU to free GPU memory
+        print("Moving source SLAT to CPU...")
+        source_slat_cpu = source_slat.to('cpu')
+        del source_slat
+
+        # Move unnecessary models to CPU to free more GPU memory
+        # Only move flow models and encoders that are not needed for decoding
+        print("Moving flow models to CPU...")
+        models_to_cpu = {}
+        for key in ['sparse_structure_flow_model', 'slat_flow_model']:
+            if key in pipeline.models:
+                models_to_cpu[key] = pipeline.models[key]
+                pipeline.models[key] = pipeline.models[key].cpu()
+
+        # Force garbage collection
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+        print(f"Memory cleaned. Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+
+        # Step 7: Decode
         print("Decoding result...")
-        outputs = pipeline.decode_slat(edit_slat, ["mesh", "gaussian"])
-        source_outputs = pipeline.decode_slat(source_slat, ["mesh", "gaussian"])
+        extra = config.extra_params or {}
+        decode_modes = extra.get("decode_modes", ["mesh"])  # Default: only mesh to save memory
+
+        # Handle string input (e.g., "mesh,gaussian" from CLI)
+        if isinstance(decode_modes, str):
+            import json
+            try:
+                decode_modes = json.loads(decode_modes)
+            except (json.JSONDecodeError, ValueError):
+                decode_modes = [m.strip() for m in decode_modes.split(",")]
+
+        print(f"Decode modes: {decode_modes}")
+
+        # Check if we should skip source decode to save memory
+        skip_source_decode = extra.get("skip_source_decode", False)
+
+        outputs = pipeline.decode_slat(edit_slat, decode_modes)
+
+        # Clean up after first decode - move outputs to CPU to free GPU memory
+        del edit_slat
+        # Move mesh to CPU immediately
+        if 'mesh' in outputs:
+            for mesh in outputs['mesh']:
+                mesh.vertices = mesh.vertices.cpu()
+                mesh.faces = mesh.faces.cpu()
+                if mesh.vertex_attrs is not None:
+                    mesh.vertex_attrs = mesh.vertex_attrs.cpu()
+                if mesh.face_normal is not None:
+                    mesh.face_normal = mesh.face_normal.cpu()
+        # Force aggressive cleanup
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()  # Wait for all operations to complete
+        gc.collect()
+        torch.cuda.empty_cache()
+        print(f"Memory after edit decode and cleanup: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+
+        # Decode source SLAT if not skipped
+        if not skip_source_decode:
+            print("Decoding source SLAT...")
+            source_slat = source_slat_cpu.to(pipeline.device)
+            del source_slat_cpu
+            source_outputs = pipeline.decode_slat(source_slat, decode_modes)
+            del source_slat
+
+            # Move source outputs to CPU as well
+            if 'mesh' in source_outputs:
+                for mesh in source_outputs['mesh']:
+                    mesh.vertices = mesh.vertices.cpu()
+                    mesh.faces = mesh.faces.cpu()
+                    if mesh.vertex_attrs is not None:
+                        mesh.vertex_attrs = mesh.vertex_attrs.cpu()
+                    if mesh.face_normal is not None:
+                        mesh.face_normal = mesh.face_normal.cpu()
+        else:
+            print("Skipping source decode to save memory")
+            source_outputs = None
+            del source_slat_cpu
+
+        # Restore models to GPU
+        print("Restoring flow models to GPU...")
+        for key, model in models_to_cpu.items():
+            pipeline.models[key] = model.to(pipeline.device)
 
         return EditMethodOutputs(
             outputs=outputs,
@@ -1057,17 +1170,6 @@ class ImageP2PLatentBlendMethod(EditMethod):
             skip_glb=skip_glb,
             skip_ply=skip_ply,
         )
-
-        if outputs.source_outputs:
-            source_dir = out_dir / "source_comparison"
-            source_dir.mkdir(exist_ok=True)
-            save_outputs(
-                outputs=outputs.source_outputs,
-                out_dir=source_dir,
-                skip_render=skip_render,
-                skip_glb=skip_glb,
-                skip_ply=skip_ply,
-            )
 
         artifact_paths = {}
         if outputs.metadata:
@@ -1124,4 +1226,5 @@ class ImageP2PLatentBlendMethod(EditMethod):
             "skip_render": True,
             "skip_glb": False,
             "skip_ply": False,
+            "decode_modes": ["mesh"],  # Only decode mesh to save memory, add "gaussian" for PLY
         }
