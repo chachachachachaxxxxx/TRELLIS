@@ -1,0 +1,44 @@
+# 单个编辑实验配置示例
+
+# 方法名称
+method: image_p2p_latent_blend
+
+# 案例名称
+case_name: test_edit
+
+# 输入文件
+source_image: assets/edit_example/images/2d_render.png
+edit_image: assets/edit_example/images/2d_edit.png
+mask_image: assets/edit_example/images/2d_mask.png
+# mask_glb: assets/edit_example/3d_edit_region.glb  # 可选
+
+# 预处理选项
+preprocess: true
+# asset_dir: /path/to/preprocessed/assets  # 可选，如果已有预处理的 assets
+
+# 基础参数
+seed: 1
+model: microsoft/TRELLIS-image-large
+
+# 环境配置
+attn_backend: flash-attn
+spconv_algo: native
+
+# 采样步数
+ss_steps: 25
+slat_steps: 25
+
+# 输出控制
+skip_render: false
+skip_glb: false
+skip_ply: false
+
+# 方法参数
+method_args:
+  inject-stages: ""  # 空字符串表示禁用 P2P
+  blend-ss-enabled: true
+  blend-slat-enabled: true
+  ss-blend-mode: soft
+  slat-blend-mode: soft
+  ss-soft-kernel-size: 5
+  slat-soft-kernel-size: 7

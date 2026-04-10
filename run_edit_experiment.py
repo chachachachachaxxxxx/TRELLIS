@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import time
+import yaml
 from pathlib import Path
 from typing import Optional
 
@@ -31,6 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Unified entrypoint for TRELLIS no-training image editing experiments."
     )
+    parser.add_argument("--config", type=str, help="YAML config file path (recommended)")
     parser.add_argument("--list-methods", action="store_true", help="List registered editing methods and exit.")
     parser.add_argument("--method", default="", help="Registered method name to run.")
     parser.add_argument(
@@ -311,6 +313,72 @@ def main() -> int:
     parser = build_parser()
     args, extra_args = parser.parse_known_args()
     extra_args = normalize_passthrough_args(list(extra_args))
+
+    # Load config from YAML if provided
+    if args.config:
+        config_path = Path(args.config)
+        if not config_path.exists():
+            print(f"[ERROR] Config file not found: {config_path}")
+            return 1
+
+        with open(config_path, "r") as f:
+            config = yaml.safe_load(f)
+
+        # Apply config values (CLI args override config)
+        if not args.method and "method" in config:
+            args.method = config["method"]
+        if not args.case and "case" in config:
+            args.case = config["case"]
+        if not args.case_name and "case_name" in config:
+            args.case_name = config["case_name"]
+        if not args.model and "model" in config:
+            args.model = config["model"]
+        if args.seed is None and "seed" in config:
+            args.seed = config["seed"]
+        if not args.attn_backend and "attn_backend" in config:
+            args.attn_backend = config["attn_backend"]
+        if not args.sparse_attn_backend and "sparse_attn_backend" in config:
+            args.sparse_attn_backend = config["sparse_attn_backend"]
+        if not args.spconv_algo and "spconv_algo" in config:
+            args.spconv_algo = config["spconv_algo"]
+        if args.preprocess is None and "preprocess" in config:
+            args.preprocess = config["preprocess"]
+        if not args.skip_render and config.get("skip_render", False):
+            args.skip_render = True
+        if not args.skip_glb and config.get("skip_glb", False):
+            args.skip_glb = True
+        if not args.skip_ply and config.get("skip_ply", False):
+            args.skip_ply = True
+        if not args.asset_dir and "asset_dir" in config:
+            args.asset_dir = config["asset_dir"]
+        if not args.render_dir and "render_dir" in config:
+            args.render_dir = config["render_dir"]
+        if not args.source_model and "source_model" in config:
+            args.source_model = config["source_model"]
+        if not args.source_image and "source_image" in config:
+            args.source_image = config["source_image"]
+        if not args.edit_image and "edit_image" in config:
+            args.edit_image = config["edit_image"]
+        if not args.mask_image and "mask_image" in config:
+            args.mask_image = config["mask_image"]
+        if not args.mask_glb and "mask_glb" in config:
+            args.mask_glb = config["mask_glb"]
+        if not args.source_prompt and "source_prompt" in config:
+            args.source_prompt = config["source_prompt"]
+        if not args.edit_prompt and "edit_prompt" in config:
+            args.edit_prompt = config["edit_prompt"]
+        if args.ss_steps is None and "ss_steps" in config:
+            args.ss_steps = config["ss_steps"]
+        if args.slat_steps is None and "slat_steps" in config:
+            args.slat_steps = config["slat_steps"]
+
+        # Load method_args from config if present
+        if "method_args" in config and not extra_args:
+            method_args_dict = config["method_args"]
+            for key, value in method_args_dict.items():
+                extra_args.append(f"--{key}")
+                if value is not None and value != "" and value is not True:
+                    extra_args.append(str(value))
 
     if args.list_methods:
         print_methods()
