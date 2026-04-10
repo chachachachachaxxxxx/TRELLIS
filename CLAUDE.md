@@ -8,12 +8,22 @@
 - **迁移指南**: `docs/METHOD_MIGRATION_GUIDE.md` - 如何迁移和添加新方法
 - **测试报告**: `docs/REFACTORING_TEST_REPORT.md` - 测试结果和验证状态
 - **反演测试**: `docs/INVERSION_TESTING.md` - 反演质量测试框架说明
+- **一键式评测**: `docs/ONE_CLICK_EVALUATION.md` - 一键式评测完整指南
+- **评测输出格式**: `docs/EVAL_OUTPUT_FORMAT.md` - Edit3D-Bench 评测输出格式说明
 
 ## 环境
 
-- 除非明确要求，始终使用 `hammer` conda 环境
-- 运行命令前默认已执行：`conda activate hammer`
-- 项目需要 Linux + NVIDIA GPU，至少 16GB 显存
+- **默认环境**: 除非明确要求，始终使用 `hammer` conda 环境
+- **环境激活**: 所有脚本和命令都应在 `hammer` 环境下运行
+- **脚本模板**: 创建 bash 脚本时，始终包含以下环境激活代码：
+  ```bash
+  #!/bin/bash
+  source ~/miniconda3/etc/profile.d/conda.sh
+  conda activate hammer
+  export ATTN_BACKEND='flash-attn'
+  export SPCONV_ALGO='native'
+  ```
+- **系统要求**: Linux + NVIDIA GPU，至少 16GB 显存
 
 ## 关键规则
 
@@ -173,6 +183,33 @@ outputs/<method_name>/<case_name>/
 ```
 
 新建脚本时复用 `output_layout.py` 的约定。
+
+## Edit3D-Bench 评测
+
+### 一键式评测（推荐）
+
+使用 `run_batch_edit_and_eval.py` 完成：数据准备 → 运行编辑 → 渲染 → 评测
+
+```bash
+# 基本用法
+python run_batch_edit_and_eval.py \
+  --gt-root /home/wangxinxing/code/Edit3Dpp/data \
+  --method-name image_p2p_latent_blend \
+  --config-name test \
+  --max-cases 1 \
+  --method-args --ss-steps 25 --slat-steps 25
+
+# 使用测试脚本
+./test_batch_dollhouse_no_p2p.sh
+```
+
+**输出位置**:
+- edit.glb: `/cache/wangxinxing/data/temp/{method_name}_{config_name}_{timestamp}/`
+- 评测结果: `outputs/results/{method_name}_{config_name}_{timestamp}/`
+
+详见：
+- `docs/EVALUATION_QUICK_START.md` - 快速开始指南
+- `docs/BATCH_EDIT_AND_EVAL.md` - 详细使用文档
 
 ## 常见陷阱
 

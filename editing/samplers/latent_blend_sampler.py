@@ -1,0 +1,349 @@
+"""Custom samplers with per-step latent blending (VoxHammer-style).
+
+Implements latent blending at each denoising step:
+- Before calling the model, blend current latent with cached source latent
+- Supports both SS stage (dense latents) and SLAT stage (sparse features)
+"""
+
+from typing import Any, Dict, Optional, Tuple
+import numpy as np
+import torch
+from tqdm import tqdm
+from easydict import EasyDict as edict
+
+from trellis.pipelines.samplers.flow_euler import FlowEulerGuidanceIntervalSampler
+
+
+class LatentBlendFlowEulerSampler(FlowEulerGuidanceIntervalSampler):
+    """Flow Euler sampler with per-step latent blending.
+
+    At each denoising step, before calling the model:
+    1. Blend current latent with source latent based on mask
+    2. Then proceed with normal Euler sampling
+
+    This implements VoxHammer's latent replacement strategy (Eq. 4 and 5).
+    """
+
+    def __init__(self, sigma_min: float):
+        super().__init__(sigma_min)
+
+        # Blending state
+        self.source_latent_cache: Optional[Dict[str, Any]] = None  # Cache of latents at each timestep
+        self.latent_mask: Optional[torch.Tensor] = None  # Blending mask
+        self.blend_enabled: bool = False
+        self.is_sparse: bool = False  # True for SLAT stage, False for SS stage
+
+    def set_blend_source(
+        self,
+        source_latent_cache: Dict[str, Any],
+        latent_mask: torch.Tensor,
+        is_sparse: bool = False,
+    ):
+        """Set source latent cache and mask for blending.
+
+        Args:
+            source_latent_cache: Dict mapping timestep to latent
+                - Key format: f"{t}" where t is normalized timestep (0-1)
+                - Value: latent tensor at that timestep
+            latent_mask: Blending mask
+                - SS stage: Tensor [B, C, D, H, W], 0=preserve source, 1=use edit
+                - SLAT stage: Tensor [N_preserve, 4] (coords of preserve region)
+            is_sparse: True for SLAT stage, False for SS stage
+        """
+        self.source_latent_cache = source_latent_cache
+        self.latent_mask = latent_mask
+        self.blend_enabled = True
+        self.is_sparse = is_sparse
+
+        # Initialize statistics
+        self.stats = {
+            'blend_calls': 0,
+            'last_sample_voxels': 0,
+            'last_source_voxels': 0,
+            'last_preserve_coords': 0,
+            'last_sample_match': 0,
+            'last_source_match': 0,
+        }
+
+    def disable_blend(self):
+        """Disable blending."""
+        self.blend_enabled = False
+        self.source_latent_cache = None
+        self.latent_mask = None
+
+    def _blend_latent(self, sample: Any, t_norm: float) -> Any:
+        """Blend current latent with cached source latent.
+
+        Args:
+            sample: Current latent at timestep t
+            t_norm: Normalized timestep (0-1)
+
+        Returns:
+            Blended latent
+        """
+        if not self.blend_enabled or self.source_latent_cache is None:
+            return sample
+
+        # Get cached source latent at this timestep
+        t_key = f"{t_norm}"
+        if t_key not in self.source_latent_cache:
+            # No cached latent at this timestep, skip blending
+            return sample
+
+        source_latent = self.source_latent_cache[t_key]
+
+        if self.is_sparse:
+            # SLAT stage: Sparse feature blending (Eq. 5)
+            return self._blend_sparse(sample, source_latent)
+        else:
+            # SS stage: Dense latent blending (Eq. 4)
+            return self._blend_dense(sample, source_latent)
+
+    def _blend_dense(self, sample: torch.Tensor, source_latent: torch.Tensor) -> torch.Tensor:
+        """Blend dense latents (SS stage).
+
+        Implements VoxHammer Eq. 4:
+            z_t ← M ⊙ z_t + (1-M) ⊙ ẑ_t
+
+        where:
+            z_t: current latent (edit)
+            ẑ_t: source latent (cached from inversion)
+            M: mask (1=edit, 0=preserve)
+        """
+        # sample: [B, C, D, H, W]
+        # source_latent: [B, C, D, H, W] (from cache)
+        # latent_mask: [B, C, D, H, W]
+
+        source = source_latent.to(sample.device, sample.dtype)
+        mask = self.latent_mask.to(sample.device, sample.dtype)
+
+        # Blend: edit * mask + source * (1 - mask)
+        blended = sample * mask + source * (1 - mask)
+
+        return blended
+
+    def _blend_sparse(self, sample, source_latent) -> Any:
+        """Blend sparse features (SLAT stage).
+
+        Implements VoxHammer Eq. 5:
+            ∀u ∈ Ωkeep: z_t[u] ← ẑ_t[u]
+
+        where:
+            Ωkeep: preserve region (coords in latent_mask)
+            z_t[u]: current feature at voxel u
+            ẑ_t[u]: source feature at voxel u (from cache)
+        """
+        # sample: SparseTensor
+        # source_latent: SparseTensor (from cache, on CPU)
+        # latent_mask: Tensor [N_preserve, 4] (coords of preserve region)
+
+        if self.latent_mask.shape[0] == 0:
+            return sample
+
+        # Move source_latent to GPU
+        source_latent = source_latent.to(sample.coords.device)
+
+        # Find matching coords between sample and preserve region
+        preserve_coords = self.latent_mask.to(sample.coords.device)
+
+        # Match sample coords with preserve coords
+        match_sample = (sample.coords.unsqueeze(1) == preserve_coords.unsqueeze(0)).all(dim=-1)
+        # Match source coords with preserve coords
+        match_source = (source_latent.coords.unsqueeze(1) == preserve_coords.unsqueeze(0)).all(dim=-1)
+
+        # Count overlaps for statistics
+        n_sample_match = match_sample.any(dim=1).sum().item()
+        n_source_match = match_source.any(dim=1).sum().item()
+
+        # Update statistics
+        if hasattr(self, 'stats'):
+            self.stats['blend_calls'] += 1
+            self.stats['last_sample_voxels'] = sample.coords.shape[0]
+            self.stats['last_source_voxels'] = source_latent.coords.shape[0]
+            self.stats['last_preserve_coords'] = preserve_coords.shape[0]
+            self.stats['last_sample_match'] = n_sample_match
+            self.stats['last_source_match'] = n_source_match
+
+        if not match_sample.any() or not match_source.any():
+            return sample
+
+        # Get indices
+        idx_sample = match_sample.float().argmax(0)
+        idx_source = match_source.float().argmax(0)
+
+        # Replace features at preserve region
+        feats = sample.feats.clone()
+        source_feats = source_latent.feats.to(feats.device, feats.dtype)
+        feats[idx_sample] = source_feats[idx_source]
+
+        # Create new SparseTensor
+        return sample.replace(feats)
+
+    @torch.no_grad()
+    def sample_once(
+        self,
+        model,
+        x_t,
+        t: float,
+        t_prev: float,
+        cond: Optional[Any] = None,
+        **kwargs
+    ):
+        """Single sampling step with latent blending.
+
+        Key difference from base class:
+        1. Blend x_t with source latent BEFORE calling model
+        2. Then proceed with normal Euler sampling
+        """
+        # Blend current latent with source (VoxHammer Eq. 4/5)
+        t_norm = t  # t is already normalized (0-1)
+        x_t = self._blend_latent(x_t, t_norm)
+
+        # Normal Euler sampling
+        pred_x_0, pred_eps, pred_v = self._get_model_prediction(model, x_t, t, cond, **kwargs)
+        pred_x_prev = x_t - (t - t_prev) * pred_v
+
+        return edict({"pred_x_prev": pred_x_prev, "pred_x_0": pred_x_0})
+
+    @torch.no_grad()
+    def sample(
+        self,
+        model,
+        noise,
+        cond: Optional[Any] = None,
+        steps: int = 50,
+        rescale_t: float = 1.0,
+        verbose: bool = True,
+        **kwargs
+    ):
+        """Generate samples with latent blending.
+
+        At each step:
+        1. Blend current latent with source
+        2. Call model to get velocity
+        3. Update latent
+        """
+        sample = noise
+        t_seq = np.linspace(1, 0, steps + 1)
+        t_seq = rescale_t * t_seq / (1 + (rescale_t - 1) * t_seq)
+        t_pairs = list((t_seq[i], t_seq[i + 1]) for i in range(steps))
+
+        ret = edict({"samples": None, "pred_x_t": [], "pred_x_0": []})
+
+        for t, t_prev in tqdm(t_pairs, desc="Sampling", disable=not verbose):
+            out = self.sample_once(model, sample, t, t_prev, cond, **kwargs)
+            sample = out.pred_x_prev
+            ret.pred_x_t.append(out.pred_x_prev)
+            ret.pred_x_0.append(out.pred_x_0)
+
+        ret.samples = sample
+        return ret
+
+
+class LatentBlendFlowEulerCfgSampler(LatentBlendFlowEulerSampler):
+    """Latent blend sampler with CFG support."""
+
+    @torch.no_grad()
+    def sample(
+        self,
+        model,
+        noise,
+        cond,
+        neg_cond,
+        steps: int = 50,
+        rescale_t: float = 1.0,
+        cfg_strength: float = 3.0,
+        verbose: bool = True,
+        **kwargs
+    ):
+        """Sample with CFG."""
+        sample = noise
+        t_seq = np.linspace(1, 0, steps + 1)
+        t_seq = rescale_t * t_seq / (1 + (rescale_t - 1) * t_seq)
+        t_pairs = list((t_seq[i], t_seq[i + 1]) for i in range(steps))
+
+        ret = edict({"samples": None, "pred_x_t": [], "pred_x_0": []})
+
+        for t, t_prev in tqdm(t_pairs, desc="Sampling", disable=not verbose):
+            # Blend latent
+            t_norm = t
+            sample = self._blend_latent(sample, t_norm)
+
+            # CFG
+            pred_x_0_cond, pred_eps_cond, pred_v_cond = self._get_model_prediction(
+                model, sample, t, cond, **kwargs
+            )
+            pred_x_0_neg, pred_eps_neg, pred_v_neg = self._get_model_prediction(
+                model, sample, t, neg_cond, **kwargs
+            )
+
+            # Apply CFG
+            pred_v = pred_v_cond + cfg_strength * (pred_v_cond - pred_v_neg)
+            pred_x_0 = pred_x_0_cond + cfg_strength * (pred_x_0_cond - pred_x_0_neg)
+
+            # Update
+            sample = sample - (t - t_prev) * pred_v
+            ret.pred_x_t.append(sample)
+            ret.pred_x_0.append(pred_x_0)
+
+        ret.samples = sample
+        return ret
+
+
+class LatentBlendFlowEulerGuidanceIntervalSampler(LatentBlendFlowEulerCfgSampler):
+    """Latent blend sampler with guidance interval (late-time CFG)."""
+
+    @torch.no_grad()
+    def sample(
+        self,
+        model,
+        noise,
+        cond,
+        neg_cond,
+        steps: int = 50,
+        rescale_t: float = 1.0,
+        cfg_strength: float = 3.0,
+        cfg_interval: Tuple[float, float] = (0.0, 1.0),
+        verbose: bool = True,
+        **kwargs
+    ):
+        """Sample with guidance interval."""
+        sample = noise
+        t_seq = np.linspace(1, 0, steps + 1)
+        t_seq = rescale_t * t_seq / (1 + (rescale_t - 1) * t_seq)
+        t_pairs = list((t_seq[i], t_seq[i + 1]) for i in range(steps))
+
+        ret = edict({"samples": None, "pred_x_t": [], "pred_x_0": []})
+
+        for t, t_prev in tqdm(t_pairs, desc="Sampling", disable=not verbose):
+            # Blend latent
+            t_norm = t
+            sample = self._blend_latent(sample, t_norm)
+
+            # Check if in CFG interval
+            if cfg_interval[0] <= t <= cfg_interval[1]:
+                # Apply CFG
+                pred_x_0_cond, pred_eps_cond, pred_v_cond = self._get_model_prediction(
+                    model, sample, t, cond, neg_cond=neg_cond,
+                    cfg_strength=cfg_strength, cfg_interval=cfg_interval, **kwargs
+                )
+                pred_x_0_neg, pred_eps_neg, pred_v_neg = self._get_model_prediction(
+                    model, sample, t, neg_cond, neg_cond=neg_cond,
+                    cfg_strength=cfg_strength, cfg_interval=cfg_interval, **kwargs
+                )
+                pred_v = pred_v_cond + cfg_strength * (pred_v_cond - pred_v_neg)
+                pred_x_0 = pred_x_0_cond + cfg_strength * (pred_x_0_cond - pred_x_0_neg)
+            else:
+                # No CFG
+                pred_x_0, pred_eps, pred_v = self._get_model_prediction(
+                    model, sample, t, cond, neg_cond=neg_cond,
+                    cfg_strength=cfg_strength, cfg_interval=cfg_interval, **kwargs
+                )
+
+            # Update
+            sample = sample - (t - t_prev) * pred_v
+            ret.pred_x_t.append(sample)
+            ret.pred_x_0.append(pred_x_0)
+
+        ret.samples = sample
+        return ret

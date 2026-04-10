@@ -1,0 +1,62 @@
+# ============================================================
+# 方法默认参数 - Image P2P Latent Blend
+# 这是方法的默认配置，可被 single/ 或 batch/ 配置引用
+# ============================================================
+
+# -------------------- 方法描述 --------------------
+method_name: image_p2p_latent_blend
+description: "Image-guided editing with Prompt-to-Prompt and Latent Blending"
+
+# -------------------- 默认采样参数 --------------------
+default_sampling:
+  ss_steps: 25      # Sparse Structure 默认步数
+  slat_steps: 25    # SLAT 默认步数
+
+# -------------------- 默认方法参数 --------------------
+default_method_args:
+  # P2P 配置
+  inject-stages: "ss,slat"  # 默认启用两阶段 P2P
+  p2p-start-step: 0.0       # P2P 起始步数比例
+  p2p-end-step: 0.8         # P2P 结束步数比例
+
+  # Latent Blend 配置
+  blend-ss-enabled: true
+  blend-slat-enabled: true
+  blend-start-step: 0.0     # Blend 起始步数比例
+  blend-end-step: 1.0       # Blend 结束步数比例
+
+  # Blend 模式
+  ss-blend-mode: soft       # "hard" 或 "soft"
+  slat-blend-mode: soft
+
+  # Soft blend 参数
+  ss-soft-kernel-size: 5
+  slat-soft-kernel-size: 7
+
+# -------------------- 预设配置 --------------------
+presets:
+  # 禁用 P2P，仅使用 Latent Blend
+  no_p2p:
+    inject-stages: ""
+    blend-ss-enabled: true
+    blend-slat-enabled: true
+
+  # 仅使用 P2P，禁用 Latent Blend
+  p2p_only:
+    inject-stages: "ss,slat"
+    blend-ss-enabled: false
+    blend-slat-enabled: false
+
+  # 完整模式（P2P + Latent Blend）
+  full:
+    inject-stages: "ss,slat"
+    blend-ss-enabled: true
+    blend-slat-enabled: true
+
+  # 快速测试（减少步数）
+  fast:
+    ss_steps: 12
+    slat_steps: 12
+    inject-stages: ""
+    blend-ss-enabled: true
+    blend-slat-enabled: true

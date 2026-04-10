@@ -1,0 +1,49 @@
+# ============================================================
+# 批处理评测配置 - 完整 Benchmark（启用 P2P + Blend）
+# 用于: run_batch_edit_and_eval.py --config edit_configs/batch/full_benchmark.yaml
+# ============================================================
+
+# -------------------- 数据集配置 --------------------
+gt_root: /home/wangxinxing/code/Edit3Dpp/data
+# dataset: GSO  # 可选：GSO, PartObjaverse-Tiny
+# max_cases: 50  # 可选：限制案例数量
+
+# -------------------- 方法配置 --------------------
+method_name: image_p2p_latent_blend
+config_name: full_benchmark  # 配置标识符
+
+# -------------------- 运行环境 --------------------
+seed: 1
+device: cuda:0
+
+# 预处理的 assets（可选）
+assets_root: /cache/wangxinxing/data/temp/renders
+
+# -------------------- 评测配置 --------------------
+metrics:
+  - psnr
+  - ssim
+  - lpips
+  - fid
+  - dino_if
+  - chamfer
+  - clip_t
+
+skip_render: false
+
+# -------------------- 方法参数 --------------------
+# 完整模式：P2P + Latent Blend
+method_args:
+  ss-steps: 25
+  slat-steps: 25
+  inject-stages: ""  # 启用两阶段 P2P
+  p2p-start-step: 0.0
+  p2p-end-step: 0.8
+  blend-ss-enabled: true
+  blend-slat-enabled: true
+  blend-start-step: 0.0
+  blend-end-step: 1.0
+  ss-blend-mode: soft
+  slat-blend-mode: soft
+  ss-soft-kernel-size: 5
+  slat-soft-kernel-size: 7

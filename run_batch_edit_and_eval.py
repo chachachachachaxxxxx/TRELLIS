@@ -61,6 +61,7 @@ def run_editing_and_eval(
     device: str,
     metrics: List[str],
     skip_render: bool = False,
+    skip_exists: bool = True,
     assets_root: Optional[Path] = None,
 ) -> tuple[bool, Optional[Dict]]:
     """批量运行编辑实验并评测"""
@@ -68,8 +69,8 @@ def run_editing_and_eval(
     # 使用固定的输出目录（不带时间戳）
     output_root = Path("/cache/wangxinxing/data/temp") / f"{method_name}_{config_name}"
 
-    # 如果目录已存在，清理旧数据
-    if output_root.exists():
+    # 如果 skip_exists 为 False，清理旧数据
+    if not skip_exists and output_root.exists():
         print(f"[INFO] 清理旧的输出目录: {output_root}")
         shutil.rmtree(output_root)
 
@@ -80,6 +81,7 @@ def run_editing_and_eval(
     print(f"方法: {method_name}")
     print(f"配置: {config_name}")
     print(f"案例数量: {len(cases)}")
+    print(f"跳过已存在: {'是' if skip_exists else '否'}")
     print("="*80)
 
     # 步骤 1: 批量运行所有编辑实验
@@ -88,6 +90,7 @@ def run_editing_and_eval(
     print("="*80)
 
     success_count = 0
+    skip_count = 0
     for i, (dataset, object_name, prompt_id) in enumerate(cases, 1):
         print(f"\n[{i}/{len(cases)}] 处理: {dataset}/{object_name}/prompt_{prompt_id}")
 
@@ -101,13 +104,23 @@ def run_editing_and_eval(
             method_args=method_args,
             seed=seed,
             device=device,
+            skip_exists=skip_exists,
             assets_root=assets_root,
         )
 
         if success:
             success_count += 1
+            # 检查是否是跳过的（已存在）
+            edit_glb = output_root / dataset / object_name / f"prompt_{prompt_id}" / "edit.glb"
+            if skip_exists and edit_glb.exists():
+                # 检查文件修改时间，如果是刚创建的则不算跳过
+                import time
+                if time.time() - edit_glb.stat().st_mtime > 60:  # 超过1分钟前创建的
+                    skip_count += 1
 
     print(f"\n[INFO] 编辑完成: {success_count}/{len(cases)} 成功")
+    if skip_count > 0:
+        print(f"[INFO] 跳过已存在: {skip_count} 个")
 
     if success_count == 0:
         print("[ERROR] 没有成功的编辑结果")
@@ -157,6 +170,7 @@ def run_single_edit(
     seed: int,
     device: str = "cuda:0",
     assets_root: Optional[Path] = None,
+    skip_exists: bool = True,
 ) -> bool:
     """运行单个编辑实验"""
 
@@ -165,6 +179,12 @@ def run_single_edit(
     object_dir = dataset_dir / object_name
     prompt_dir = object_dir / f"prompt_{prompt_id}"
     prompt_dir.mkdir(parents=True, exist_ok=True)
+
+    # 检查是否已经生成过 edit.glb
+    edit_glb = prompt_dir / "edit.glb"
+    if skip_exists and edit_glb.exists():
+        print(f"[SKIP] edit.glb 已存在: {edit_glb}")
+        return True
 
     # 获取输入文件路径
     gt_object_dir = gt_root / dataset / object_name
@@ -432,6 +452,10 @@ def main():
                         help="计算设备")
     parser.add_argument("--skip-render", action="store_true",
                         help="跳过渲染")
+    parser.add_argument("--skip-exists", action="store_true", default=True,
+                        help="跳过已存在的 edit.glb 文件（默认启用）")
+    parser.add_argument("--no-skip-exists", dest="skip_exists", action="store_false",
+                        help="不跳过已存在的文件，重新生成所有结果")
 
     args = parser.parse_args()
 
@@ -458,6 +482,7 @@ def main():
         metrics = config.get("metrics", ["psnr", "ssim", "lpips", "fid", "dino_if", "chamfer", "clip_t"])
         device = config.get("device", "cuda:0")
         skip_render = config.get("skip_render", False)
+        skip_exists = config.get("skip_exists", True)
 
         # 转换 method_args 从字典到命令行参数列表
         method_args = []
@@ -510,6 +535,7 @@ def main():
         metrics = args.metrics
         device = args.device
         skip_render = args.skip_render
+        skip_exists = args.skip_exists
         method_args = args.method_args or []
 
     print("="*80)

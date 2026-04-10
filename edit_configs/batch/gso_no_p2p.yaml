@@ -1,0 +1,47 @@
+# ============================================================
+# 批处理评测配置 - GSO 数据集（禁用 P2P）
+# 用于: run_batch_edit_and_eval.py --config configs/batch/gso_no_p2p.yaml
+# ============================================================
+
+# -------------------- 数据集配置 --------------------
+gt_root: /home/wangxinxing/code/Edit3Dpp/data
+dataset: GSO  # 数据集过滤
+# object: specific_object_name  # 可选：指定物体
+# prompt_id: 1  # 可选：1, 2, 3
+# max_cases: 10  # 可选：限制案例数量
+
+# -------------------- 方法配置 --------------------
+method_name: image_p2p_latent_blend
+config_name: gso_no_p2p  # 配置标识符（用于输出目录命名）
+
+# -------------------- 运行环境 --------------------
+seed: 1
+device: cuda:0
+
+# 预处理的 assets（可选，加速处理）
+assets_root: /cache/wangxinxing/data/temp/renders
+
+# -------------------- 评测配置 --------------------
+metrics:
+  - psnr
+  - ssim
+  - lpips
+  - fid
+  - dino_if
+  - chamfer
+  - clip_t
+
+skip_render: false  # 是否跳过渲染步骤
+
+# -------------------- 方法参数 --------------------
+# 这些参数会传递给每个单独的编辑实验
+method_args:
+  ss-steps: 25
+  slat-steps: 25
+  inject-stages: ""  # 禁用 P2P
+  blend-ss-enabled: true
+  blend-slat-enabled: true
+  ss-blend-mode: soft
+  slat-blend-mode: soft
+  ss-soft-kernel-size: 5
+  slat-soft-kernel-size: 7

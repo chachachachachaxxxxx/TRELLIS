@@ -1,0 +1,53 @@
+# ============================================================
+# 单个样例编辑实验配置
+# 用于: run_edit_experiment.py --config configs/single/image_p2p_example.yaml
+# ============================================================
+
+# -------------------- 基本信息 --------------------
+method: image_p2p_latent_blend
+case_name: test_edit
+
+# -------------------- 输入文件 --------------------
+source_image: assets/edit_example/images/2d_render.png
+edit_image: assets/edit_example/images/2d_edit.png
+mask_image: assets/edit_example/images/2d_mask.png
+# mask_glb: assets/edit_example/3d_edit_region.glb  # 可选 3D mask
+
+# -------------------- 预处理 --------------------
+preprocess: true
+# asset_dir: /path/to/preprocessed/assets  # 如果已有预处理的 assets，跳过预处理
+
+# -------------------- 运行环境 --------------------
+seed: 1
+device: cuda:0
+model: microsoft/TRELLIS-image-large
+
+# 后端配置
+attn_backend: flash-attn
+spconv_algo: native
+
+# -------------------- 采样参数 --------------------
+ss_steps: 25      # Sparse Structure 采样步数
+slat_steps: 25    # SLAT 采样步数
+
+# -------------------- 输出控制 --------------------
+skip_render: false
+skip_glb: false
+skip_ply: false
+
+# -------------------- 方法参数 --------------------
+method_args:
+  # P2P 控制
+  inject-stages: ""  # 空字符串 = 禁用 P2P，"ss,slat" = 启用两阶段
+
+  # Latent Blend 控制
+  blend-ss-enabled: true
+  blend-slat-enabled: true
+
+  # Blend 模式: "hard" 或 "soft"
+  ss-blend-mode: soft
+  slat-blend-mode: soft
+
+  # Soft blend 核大小（仅在 soft 模式下生效）
+  ss-soft-kernel-size: 5
+  slat-soft-kernel-size: 7
