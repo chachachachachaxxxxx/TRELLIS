@@ -459,7 +459,12 @@ def main():
         if "method_args" in config:
             for key, value in config["method_args"].items():
                 method_args.append(f"--{key}")
-                if value is not None and value != "" and value is not True:
+                # 布尔值 True 转换为标志参数（不带值）
+                # None 或 False 跳过
+                # 其他值（包括空字符串 ""）都添加
+                if value is True:
+                    continue  # 标志参数，不添加值
+                elif value is not None and value is not False:
                     method_args.append(str(value))
 
         # 命令行参数覆盖配置文件

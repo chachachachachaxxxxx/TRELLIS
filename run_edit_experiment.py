@@ -377,7 +377,12 @@ def main() -> int:
             method_args_dict = config["method_args"]
             for key, value in method_args_dict.items():
                 extra_args.append(f"--{key}")
-                if value is not None and value != "" and value is not True:
+                # 布尔值 True 转换为标志参数（不带值）
+                # None 或 False 跳过
+                # 其他值（包括空字符串 ""）都添加
+                if value is True:
+                    continue  # 标志参数，不添加值
+                elif value is not None and value is not False:
                     extra_args.append(str(value))
 
     if args.list_methods:
