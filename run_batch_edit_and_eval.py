@@ -100,6 +100,7 @@ def run_editing_and_eval(
             prompt_id=prompt_id,
             method_args=method_args,
             seed=seed,
+            device=device,
             assets_root=assets_root,
         )
 
@@ -154,6 +155,7 @@ def run_single_edit(
     prompt_id: int,
     method_args: List[str],
     seed: int,
+    device: str = "cuda:0",
     assets_root: Optional[Path] = None,
 ) -> bool:
     """运行单个编辑实验"""
@@ -213,6 +215,9 @@ def run_single_edit(
 
     if mask_glb.exists():
         cmd.extend(["--mask-glb", str(mask_glb)])
+
+    # 添加设备参数
+    cmd.extend(["--device", device])
 
     # 添加方法参数
     cmd.extend(method_args)

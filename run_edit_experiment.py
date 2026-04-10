@@ -81,6 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--edit-prompt", default="", help="Override edit text prompt.")
     parser.add_argument("--ss-steps", type=int, default=None, help="Override sparse structure sampling steps (default: 25).")
     parser.add_argument("--slat-steps", type=int, default=None, help="Override SLAT sampling steps (default: 25).")
+    parser.add_argument("--device", type=str, default="cuda:0", help="Device to use (default: cuda:0).")
     parser.add_argument(
         "--init-case",
         default="",
@@ -160,6 +161,7 @@ def run_method_class(
     extra_args: list,
     ss_steps: Optional[int] = None,
     slat_steps: Optional[int] = None,
+    device: str = "cuda:0",
 ) -> int:
     """Run method using method class (new way).
 
@@ -171,6 +173,7 @@ def run_method_class(
         effective_seed: Seed
         effective_preprocess: Preprocess flag
         backend: Backend config
+        device: Device to use (e.g., cuda:0)
         skip_render: Skip render flag
         skip_glb: Skip GLB flag
         skip_ply: Skip PLY flag
@@ -194,7 +197,11 @@ def run_method_class(
     else:
         from trellis.pipelines import TrellisImageTo3DPipeline
         pipeline = TrellisImageTo3DPipeline.from_pretrained(effective_model)
-    pipeline.cuda()
+
+    # Move pipeline to specified device
+    import torch
+    pipeline.to(torch.device(device))
+    print(f"Pipeline loaded on device: {device}")
 
     # Load inputs based on method type
     if is_text_method:
@@ -371,6 +378,8 @@ def main() -> int:
             args.ss_steps = config["ss_steps"]
         if args.slat_steps is None and "slat_steps" in config:
             args.slat_steps = config["slat_steps"]
+        if not args.device and "device" in config:
+            args.device = config["device"]
 
         # Load method_args from config if present
         if "method_args" in config and not extra_args:
@@ -469,6 +478,7 @@ def main() -> int:
             extra_args=extra_args,
             ss_steps=args.ss_steps,
             slat_steps=args.slat_steps,
+            device=args.device,
         )
 
     # Fallback to script-based execution (legacy)

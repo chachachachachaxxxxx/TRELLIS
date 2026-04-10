@@ -19,6 +19,7 @@ preprocess: true
 # 基础参数
 seed: 1
 model: microsoft/TRELLIS-image-large
+device: cuda:0
 
 # 环境配置
 attn_backend: flash-attn
