@@ -600,6 +600,7 @@ def main():
         device=device,
         metrics=metrics,
         skip_render=skip_render,
+        skip_exists=skip_exists,
         assets_root=assets_root,
     )
 
