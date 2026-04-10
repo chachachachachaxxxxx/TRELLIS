@@ -256,7 +256,7 @@ class TextPromptToPromptMethod(EditMethod):
             "slat_t_end": 0.0,
             "slat_strength": 1.0,
             "query_chunk": 1024,
-            "skip_source": False,
+            "skip_source": True,
             "skip_render": True,  # Skip video rendering by default
             "skip_glb": False,
             "skip_ply": False,

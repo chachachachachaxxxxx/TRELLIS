@@ -242,7 +242,7 @@ def run_method_class(
 
     # Parse extra args into config (merge with defaults)
     extra_params = {
-        "skip_source": False,
+        "skip_source": True,
     }
 
     # Apply method defaults

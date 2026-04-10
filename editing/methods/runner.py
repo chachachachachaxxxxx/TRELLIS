@@ -37,7 +37,7 @@ class EditMethodRunner:
         case_name: str,
         preprocess: bool = True,
         mask_threshold: int = 128,
-        skip_source: bool = False,
+        skip_source: bool = True,
         source_voxels_path: Optional[Path] = None,
         source_features_path: Optional[Path] = None,
         mask_glb_path: Optional[Path] = None,
