@@ -1,5 +1,6 @@
 from typing import *
 from contextlib import contextmanager
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -71,8 +72,21 @@ class TrellisImageTo3DPipeline(Pipeline):
         """
         Initialize the image conditioning model.
         """
-        dinov2_model = torch.hub.load('facebookresearch/dinov2', name, pretrained=True, trust_repo=True)
-        dinov2_model.eval()
+        # Always prefer local torch.hub cache to avoid flaky network/GitHub checks.
+        hub_repo_dir = os.path.join(torch.hub.get_dir(), "facebookresearch_dinov2_main")
+        if not os.path.isdir(hub_repo_dir):
+            raise RuntimeError(
+                "Local DINOv2 hub cache not found. Expected repo at: "
+                f"{hub_repo_dir}. "
+                "Please warm up cache once (with network) and rerun in offline mode."
+            )
+        dinov2_model = torch.hub.load(
+            hub_repo_dir,
+            name,
+            source="local",
+            pretrained=True,
+            trust_repo=True,
+        )
         self.models['image_cond_model'] = dinov2_model
         transform = transforms.Compose([
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),

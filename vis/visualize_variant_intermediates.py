@@ -23,7 +23,7 @@ os.environ.setdefault("SPCONV_ALGO", "native")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Visualize all major intermediates of TRELLIS variant editing."
+        description="Visualize all major intermediates of TRELLIS variant trellis_edit."
     )
     parser.add_argument(
         "--model",
@@ -33,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mesh",
         default="assets/T.ply",
-        help="Base mesh path used for variant editing.",
+        help="Base mesh path used for variant trellis_edit.",
     )
     parser.add_argument(
         "--prompt",

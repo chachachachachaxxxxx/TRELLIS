@@ -2,44 +2,43 @@
 from __future__ import annotations
 
 import argparse
-import os
-import subprocess
-import sys
-import time
-import yaml
+from dataclasses import asdict, fields, is_dataclass, replace
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
-from PIL import Image
+import yaml
 
-from editing.common import (
-    apply_backend_env,
-    build_backend_config,
-    build_experiment_output_layout,
-    ensure_dir,
-    sanitize_name,
-    utc_now_iso,
-    write_json,
+from trellis_edit.common import build_experiment_output_layout
+from trellis_edit.composable import (
+    ComposableExperimentRunner,
+    InputConfig,
+    RuntimeConfig,
+    get_entrypoint,
+    has_entrypoint,
+    list_entrypoints,
 )
-from editing.io.case_loader import apply_case_overrides, load_case, summarize_case
-from editing.methods import EditMethodConfig, EditMethodRunner, get_method, list_methods
 
 
-REPO_ROOT = Path(__file__).resolve().parent
+LEGACY_CONFIG_KEYS = (
+    "method",
+    "case",
+    "method_args",
+    "extra_params",
+    "asset_dir",
+    "render_dir",
+    "source_model",
+    "source_prompt",
+    "edit_prompt",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Unified entrypoint for TRELLIS no-training image editing experiments."
+        description="Composable entrypoint for TRELLIS no-training image editing experiments."
     )
     parser.add_argument("--config", type=str, help="YAML config file path (recommended)")
-    parser.add_argument("--list-methods", action="store_true", help="List registered editing methods and exit.")
-    parser.add_argument("--method", default="", help="Registered method name to run.")
-    parser.add_argument(
-        "--case",
-        default="",
-        help="Case directory or manifest.json path. When omitted, use CLI asset overrides directly.",
-    )
+    parser.add_argument("--list-entrypoints", action="store_true", help="List runnable composable entrypoints.")
+    parser.add_argument("--entrypoint", default="", help="Composable entrypoint name to run.")
     parser.add_argument("--case-name", default="", help="Optional output case name override.")
     parser.add_argument("--model", default="", help="Pipeline checkpoint or Hugging Face repo override.")
     parser.add_argument("--seed", type=int, default=None, help="Seed override.")
@@ -52,568 +51,297 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--spconv-algo",
         default="",
-        help="spconv algorithm override. Defaults to case/default/native.",
+        help="spconv algorithm override. Defaults to native unless runtime config overrides it.",
     )
-    parser.set_defaults(preprocess=None)
-    parser.add_argument(
-        "--preprocess",
-        dest="preprocess",
-        action="store_true",
-        help="Force shared source/edit/mask preprocessing on the target method.",
-    )
-    parser.add_argument(
-        "--no-preprocess",
-        dest="preprocess",
-        action="store_false",
-        help="Disable shared preprocessing and rely on already aligned inputs.",
-    )
-    parser.add_argument("--skip-render", action="store_true", help="Forward --skip-render to the method script.")
-    parser.add_argument("--skip-glb", action="store_true", help="Forward --skip-glb to the method script.")
-    parser.add_argument("--skip-ply", action="store_true", help="Forward --skip-ply to the method script.")
-    parser.add_argument("--asset-dir", default="", help="Override source asset directory (preprocessed 3D assets).")
-    parser.add_argument("--render-dir", default="", help="Override render directory that contains voxels/features.")
-    parser.add_argument("--source-model", default="", help="Override source model path.")
-    parser.add_argument("--source-image", default="", help="Override aligned source render image.")
-    parser.add_argument("--edit-image", default="", help="Override edited target image.")
-    parser.add_argument("--mask-image", default="", help="Override 2D edit mask.")
-    parser.add_argument("--mask-glb", default="", help="Override 3D edit mask GLB/GLTF.")
-    parser.add_argument("--source-prompt", default="", help="Override source text prompt.")
-    parser.add_argument("--edit-prompt", default="", help="Override edit text prompt.")
-    parser.add_argument("--ss-steps", type=int, default=None, help="Override sparse structure sampling steps (default: 25).")
-    parser.add_argument("--slat-steps", type=int, default=None, help="Override SLAT sampling steps (default: 25).")
+    parser.add_argument("--skip-render", action="store_true", help="Skip preview rendering outputs.")
+    parser.add_argument("--skip-glb", action="store_true", help="Skip GLB export.")
+    parser.add_argument("--skip-ply", action="store_true", help="Skip PLY export.")
+    parser.add_argument("--source-image", default="", help="Aligned source render image.")
+    parser.add_argument("--edit-image", default="", help="Edited target image.")
+    parser.add_argument("--mask-image", default="", help="2D edit mask.")
+    parser.add_argument("--mask-glb", default="", help="3D edit mask GLB/GLTF.")
+    parser.add_argument("--source-voxels", default="", help="Source voxel coords path.")
+    parser.add_argument("--source-features", default="", help="Source SLAT feature path.")
+    parser.add_argument("--edited-coords", default="", help="Edited coords path for SLAT-only runs.")
+    parser.add_argument("--ss-steps", type=int, default=None, help="Override sparse structure sampling steps.")
+    parser.add_argument("--slat-steps", type=int, default=None, help="Override SLAT sampling steps.")
+    parser.add_argument("--num-samples", type=int, default=None, help="Override sample count.")
+    parser.add_argument("--output-root", default="", help="Override output root.")
+    parser.add_argument("--save-source-outputs", action="store_true", help="Save source decode outputs for SLAT runs.")
     parser.add_argument("--device", type=str, default="cuda:0", help="Device to use (default: cuda:0).")
-    parser.add_argument(
-        "--init-case",
-        default="",
-        help="Create a standard editing case directory with source/, edit/, and manifest.json, then exit.",
-    )
-    parser.add_argument("--dry-run", action="store_true", help="Resolve inputs and print the method command without running it.")
+    parser.add_argument("--dry-run", action="store_true", help="Resolve inputs and print the final experiment config.")
     return parser
 
 
-def print_methods() -> None:
-    for spec in list_methods():
-        print(f"{spec.name}: {spec.description}")
+def print_entrypoints() -> None:
+    for entrypoint in list_entrypoints():
+        print(f"{entrypoint.name}: {entrypoint.description}")
 
 
-def resolve_effective_value(args_value, case_defaults: dict, key: str, fallback=None):
-    if args_value not in (None, ""):
-        return args_value
-    if key in case_defaults:
-        return case_defaults[key]
-    return fallback
+def _coerce_config_path(value: str | Path | None) -> Path | None:
+    if value in (None, ""):
+        return None
+    return Path(value).expanduser().resolve()
 
 
-def normalize_passthrough_args(extra_args: list[str]) -> list[str]:
-    if extra_args and extra_args[0] == "--":
-        return extra_args[1:]
-    return extra_args
+def _serialize_config_value(value: Any) -> Any:
+    if is_dataclass(value):
+        return _serialize_config_value(asdict(value))
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _serialize_config_value(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_serialize_config_value(item) for item in value]
+    return value
 
 
-def build_case_manifest_template(case_name: str) -> dict:
-    return {
-        "case_name": sanitize_name(case_name, fallback="case"),
-        "notes": "",
-        "defaults": {
-            "model": "microsoft/TRELLIS-image-large",
-            "seed": 1,
-            "preprocess": True,
-            "spconv_algo": "native",
-        },
-        "source": {
-            "dir": "source",
-        },
-        "edit": {
-            "dir": "edit",
-        },
-        "methods": {
-            spec.name: {
-                "args": [],
-            }
-            for spec in list_methods()
-        },
-    }
+def _apply_dataclass_overrides(template: Any, overrides: dict[str, Any], label: str) -> Any:
+    if not isinstance(overrides, dict):
+        raise RuntimeError(f"{label} overrides must be a mapping, got {type(overrides).__name__}")
+
+    valid_fields = {field.name: field for field in fields(template)}
+    unknown = sorted(set(overrides) - set(valid_fields))
+    if unknown:
+        raise RuntimeError(f"{label} has unknown keys: {', '.join(unknown)}")
+
+    updated_values: dict[str, Any] = {}
+    for key, value in overrides.items():
+        current = getattr(template, key)
+        if is_dataclass(current):
+            updated_values[key] = _apply_dataclass_overrides(current, value, f"{label}.{key}")
+        elif isinstance(current, tuple) and isinstance(value, list):
+            updated_values[key] = tuple(value)
+        elif isinstance(current, Path):
+            updated_values[key] = _coerce_config_path(value)
+        else:
+            updated_values[key] = value
+
+    return replace(template, **updated_values)
 
 
-def init_case_directory(case_dir: Path) -> Path:
-    case_dir = case_dir.expanduser().resolve()
-    manifest_path = case_dir / "manifest.json"
-    if manifest_path.exists():
-        raise RuntimeError(f"Refusing to overwrite existing manifest: {manifest_path}")
-
-    ensure_dir(case_dir / "source")
-    ensure_dir(case_dir / "edit")
-    write_json(manifest_path, build_case_manifest_template(case_dir.name))
-    return manifest_path
-
-
-def run_method_class(
-    method_spec,
-    case,
-    effective_case_name: str,
-    effective_model: str,
-    effective_seed: int,
-    effective_preprocess: bool,
-    backend,
-    skip_render: bool,
-    skip_glb: bool,
-    skip_ply: bool,
-    extra_args: list,
-    ss_steps: Optional[int] = None,
-    slat_steps: Optional[int] = None,
-    device: str = "cuda:0",
-) -> int:
-    """Run method using method class (new way).
-
-    Args:
-        method_spec: MethodSpec with method_class
-        case: EditingCase
-        effective_case_name: Case name
-        effective_model: Model path
-        effective_seed: Seed
-        effective_preprocess: Preprocess flag
-        backend: Backend config
-        device: Device to use (e.g., cuda:0)
-        skip_render: Skip render flag
-        skip_glb: Skip GLB flag
-        skip_ply: Skip PLY flag
-        extra_args: Extra CLI args
-
-    Returns:
-        Exit code (0 for success)
-    """
-    # Apply backend environment
-    for key, value in backend.env.items():
-        os.environ[key] = value
-
-    # Determine pipeline type based on method
-    is_text_method = "text" in method_spec.name
-
-    # Load pipeline
-    print(f"Loading pipeline: {effective_model}")
-    print(f"Target device: {device}")
-    print(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')}")
-
-    import torch
-
-    # If CUDA_VISIBLE_DEVICES is set, use cuda:0 (which maps to the visible device)
-    # Otherwise use the specified device
-    if "CUDA_VISIBLE_DEVICES" in os.environ and device.startswith("cuda:"):
-        load_device = "cuda:0"
-        print(f"CUDA_VISIBLE_DEVICES is set, loading to cuda:0 (physical device {os.environ['CUDA_VISIBLE_DEVICES']})")
-    else:
-        load_device = device
-
-    if is_text_method:
-        from trellis.pipelines import TrellisTextTo3DPipeline
-        pipeline = TrellisTextTo3DPipeline.from_pretrained(effective_model)
-    else:
-        from trellis.pipelines import TrellisImageTo3DPipeline
-        pipeline = TrellisImageTo3DPipeline.from_pretrained(effective_model)
-
-    # Move pipeline to specified device
-    pipeline.to(torch.device(load_device))
-    print(f"Pipeline loaded on device: {pipeline.device}")
-
-    # Load inputs based on method type
-    if is_text_method:
-        source_prompt = case.source_prompt
-        edit_prompt = case.edit_prompt
-        if not source_prompt or not edit_prompt:
-            raise RuntimeError("Text method requires source_prompt and edit_prompt")
-        source_image = None
-        edit_image = None
-        mask_image = None
-    else:
-        source_image = Image.open(case.source_image) if case.source_image else None
-        edit_image = Image.open(case.edit_image) if case.edit_image else None
-        mask_image = Image.open(case.mask_image) if case.mask_image else None
-        # Some methods (like fusion) don't require source_image
-        if edit_image is None:
-            raise RuntimeError("Image method requires at least edit_image")
-        if source_image is None and method_spec.name not in ["image_slat_xor_fusion"]:
-            raise RuntimeError(f"Method {method_spec.name} requires source_image")
-        source_prompt = None
-        edit_prompt = None
-
-    # Get method default config
-    method = method_spec.create_method()
-    default_config = method.get_default_config()
-
-    # Parse extra args into config (merge with defaults)
-    extra_params = {
-        "skip_source": True,
-    }
-
-    # Apply method defaults
-    extra_params.update(default_config)
-
-    # Override with CLI flags if explicitly set
-    if skip_render:
-        extra_params["skip_render"] = True
-    if skip_glb:
-        extra_params["skip_glb"] = True
-    if skip_ply:
-        extra_params["skip_ply"] = True
-
-    # Parse extra args (simple key=value parsing)
-    for arg in extra_args:
-        if "=" in arg:
-            key, value = arg.split("=", 1)
-            key = key.lstrip("-").replace("-", "_")
-            # Try to parse as number or bool
-            if value.lower() in ("true", "false"):
-                extra_params[key] = value.lower() == "true"
-            elif value.isdigit():
-                extra_params[key] = int(value)
-            else:
-                try:
-                    extra_params[key] = float(value)
-                except ValueError:
-                    extra_params[key] = value
-
-    # Build sampler params
-    sparse_structure_sampler_params = {}
-    if ss_steps is not None:
-        sparse_structure_sampler_params["steps"] = ss_steps
-
-    slat_sampler_params = {}
-    if slat_steps is not None:
-        slat_sampler_params["steps"] = slat_steps
-
-    # Build config
-    config = EditMethodConfig(
-        method_name=method_spec.name,
-        seed=effective_seed,
-        num_samples=1,
-        sparse_structure_sampler_params=sparse_structure_sampler_params if sparse_structure_sampler_params else None,
-        slat_sampler_params=slat_sampler_params if slat_sampler_params else None,
-        extra_params=extra_params,
+def _build_runtime(args) -> RuntimeConfig:
+    output_root = _coerce_config_path(args.output_root) or Path("outputs").resolve()
+    return RuntimeConfig(
+        model=str(args.model),
+        case_name=str(args.case_name),
+        seed=int(args.seed if args.seed is not None else 42),
+        device=str(args.device),
+        output_root=output_root,
+        num_samples=int(args.num_samples or 1),
+        attn_backend=str(args.attn_backend or ""),
+        sparse_attn_backend=str(args.sparse_attn_backend or ""),
+        spconv_algo=str(args.spconv_algo or "native"),
+        skip_render=bool(args.skip_render),
+        skip_glb=bool(args.skip_glb),
+        skip_ply=bool(args.skip_ply),
+        save_source_outputs=bool(args.save_source_outputs),
     )
 
-    # Use the already created method instance
-    runner = EditMethodRunner(method, pipeline)
 
-    # Run
-    print(f"Running method: {method_spec.name}")
-    print(f"Case: {effective_case_name}")
-    print(f"Seed: {effective_seed}")
+def _build_inputs(args) -> InputConfig:
+    return InputConfig(
+        source_image=_coerce_config_path(args.source_image),
+        edit_image=_coerce_config_path(args.edit_image),
+        mask_image=_coerce_config_path(args.mask_image),
+        mask_glb=_coerce_config_path(args.mask_glb),
+        source_voxels=_coerce_config_path(args.source_voxels),
+        source_features=_coerce_config_path(args.source_features),
+        edited_coords=_coerce_config_path(args.edited_coords),
+    )
 
-    try:
-        # Build extra inputs for text methods
-        extra_inputs = {}
-        if is_text_method:
-            extra_inputs["source_prompt"] = source_prompt
-            extra_inputs["edit_prompt"] = edit_prompt
 
-        runner.run(
-            source_image=source_image,
-            edit_image=edit_image,
-            mask_image=mask_image,
-            config=config,
-            case_name=effective_case_name,
-            preprocess=effective_preprocess,
-            source_voxels_path=case.asset_dir / "voxels.ply" if case.asset_dir else None,
-            source_features_path=case.asset_dir / "features.npz" if case.asset_dir else None,
-            mask_glb_path=case.mask_glb,
-            asset_dir=case.asset_dir,
-            extra_inputs=extra_inputs,
+def _apply_config_overrides(base_config, config_data: dict[str, Any]):
+    config = base_config
+
+    preprocess_overrides = config_data.get("preprocess")
+    if preprocess_overrides is not None:
+        config = replace(
+            config,
+            preprocess=_apply_dataclass_overrides(config.preprocess, preprocess_overrides, "preprocess"),
         )
-        print(f"✓ Method completed successfully")
+
+    ss_overrides = config_data.get("ss")
+    if ss_overrides is not None:
+        if config.ss is None:
+            raise RuntimeError(f"{config.entry_name} does not expose an ss stage")
+        config = replace(
+            config,
+            ss=replace(
+                config.ss,
+                config=_apply_dataclass_overrides(config.ss.config, ss_overrides, "ss"),
+            ),
+        )
+
+    slat_overrides = config_data.get("slat")
+    if slat_overrides is not None:
+        if config.slat is None:
+            raise RuntimeError(f"{config.entry_name} does not expose a slat stage")
+        config = replace(
+            config,
+            slat=replace(
+                config.slat,
+                config=_apply_dataclass_overrides(config.slat.config, slat_overrides, "slat"),
+            ),
+        )
+
+    return config
+
+
+def _reject_legacy_config(config_data: dict[str, Any]) -> None:
+    legacy_keys = [key for key in LEGACY_CONFIG_KEYS if key in config_data]
+    if legacy_keys:
+        raise RuntimeError(
+            "Legacy config keys are no longer supported: "
+            + ", ".join(sorted(legacy_keys))
+            + ". Use entrypoint + runtime/inputs/preprocess/ss/slat."
+        )
+
+
+def _load_config(args, parser: argparse.ArgumentParser) -> dict[str, Any]:
+    config_data: dict[str, Any] = {}
+    if not args.config:
+        return config_data
+
+    config_path = Path(args.config)
+    if not config_path.exists():
+        parser.error(f"Config file not found: {config_path}")
+
+    with open(config_path, "r", encoding="utf-8") as handle:
+        loaded_config = yaml.safe_load(handle) or {}
+    if not isinstance(loaded_config, dict):
+        raise RuntimeError(f"Config file must deserialize to a mapping, got {type(loaded_config).__name__}")
+
+    _reject_legacy_config(loaded_config)
+    config_data = loaded_config
+    runtime_config = loaded_config.get("runtime") if isinstance(loaded_config.get("runtime"), dict) else {}
+    inputs_config = loaded_config.get("inputs") if isinstance(loaded_config.get("inputs"), dict) else {}
+
+    default_device = parser.get_default("device")
+
+    def nested_value(section: dict[str, Any], key: str):
+        if key in section and section[key] not in (None, ""):
+            return section[key]
+        return None
+
+    if not args.entrypoint and (value := loaded_config.get("entrypoint")) not in (None, ""):
+        args.entrypoint = value
+    if not args.case_name and (value := nested_value(runtime_config, "case_name")) is not None:
+        args.case_name = value
+    if not args.model and (value := nested_value(runtime_config, "model")) is not None:
+        args.model = value
+    if args.seed is None and runtime_config.get("seed") is not None:
+        args.seed = runtime_config["seed"]
+    if not args.attn_backend and (value := nested_value(runtime_config, "attn_backend")) is not None:
+        args.attn_backend = value
+    if not args.sparse_attn_backend and (value := nested_value(runtime_config, "sparse_attn_backend")) is not None:
+        args.sparse_attn_backend = value
+    if not args.spconv_algo and (value := nested_value(runtime_config, "spconv_algo")) is not None:
+        args.spconv_algo = value
+    if not args.skip_render and bool(runtime_config.get("skip_render")):
+        args.skip_render = True
+    if not args.skip_glb and bool(runtime_config.get("skip_glb")):
+        args.skip_glb = True
+    if not args.skip_ply and bool(runtime_config.get("skip_ply")):
+        args.skip_ply = True
+    if not args.save_source_outputs and bool(runtime_config.get("save_source_outputs")):
+        args.save_source_outputs = True
+    if args.num_samples is None and runtime_config.get("num_samples") is not None:
+        args.num_samples = runtime_config["num_samples"]
+    if not args.output_root and (value := nested_value(runtime_config, "output_root")) is not None:
+        args.output_root = value
+    if args.device == default_device and (value := nested_value(runtime_config, "device")) is not None:
+        args.device = value
+
+    for field_name, arg_name in (
+        ("source_image", "source_image"),
+        ("edit_image", "edit_image"),
+        ("mask_image", "mask_image"),
+        ("mask_glb", "mask_glb"),
+        ("source_voxels", "source_voxels"),
+        ("source_features", "source_features"),
+        ("edited_coords", "edited_coords"),
+    ):
+        if getattr(args, arg_name) in ("", None):
+            value = nested_value(inputs_config, field_name)
+            if value is not None:
+                setattr(args, arg_name, value)
+
+    return config_data
+
+
+def run_entrypoint(entrypoint_name: str, args, config_data: dict[str, Any]) -> int:
+    if not args.model:
+        raise RuntimeError(f"{entrypoint_name} requires --model or runtime.model")
+    if not args.case_name:
+        raise RuntimeError(f"{entrypoint_name} requires --case-name or runtime.case_name")
+
+    entrypoint = get_entrypoint(entrypoint_name)
+    runtime = _build_runtime(args)
+    inputs = _build_inputs(args)
+    config = entrypoint.build(runtime=runtime, inputs=inputs)
+    config = _apply_config_overrides(config, config_data)
+
+    if args.ss_steps is not None:
+        if config.ss is None:
+            raise RuntimeError(f"{config.entry_name} does not expose an ss stage")
+        config = replace(
+            config,
+            ss=replace(
+                config.ss,
+                config=replace(config.ss.config, sampler=replace(config.ss.config.sampler, steps=args.ss_steps)),
+            ),
+        )
+
+    if args.slat_steps is not None:
+        if config.slat is None:
+            raise RuntimeError(f"{config.entry_name} does not expose a slat stage")
+        config = replace(
+            config,
+            slat=replace(
+                config.slat,
+                config=replace(config.slat.config, sampler=replace(config.slat.config.sampler, steps=args.slat_steps)),
+            ),
+        )
+
+    config.validate_inputs()
+
+    if args.dry_run:
+        print(yaml.safe_dump(_serialize_config_value(config), sort_keys=False, allow_unicode=True))
         return 0
-    except Exception as e:
-        print(f"✗ Method failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return 1
+
+    runner = ComposableExperimentRunner(config)
+    runner.run()
+    layout = build_experiment_output_layout(
+        method_name=config.entry_name,
+        case_name=config.runtime.case_name,
+        outputs_root=config.runtime.output_root,
+    )
+    print(f"Experiment finished: {layout.case_dir}")
+    print(f"Outputs: {layout.edit_dir}")
+    return 0
 
 
 def main() -> int:
     parser = build_parser()
-    args, extra_args = parser.parse_known_args()
-    extra_args = normalize_passthrough_args(list(extra_args))
+    args = parser.parse_args()
+    config_data = _load_config(args, parser)
 
-    # Load config from YAML if provided
-    if args.config:
-        config_path = Path(args.config)
-        if not config_path.exists():
-            print(f"[ERROR] Config file not found: {config_path}")
-            return 1
-
-        with open(config_path, "r") as f:
-            config = yaml.safe_load(f)
-
-        # Apply config values (CLI args override config)
-        if not args.method and "method" in config:
-            args.method = config["method"]
-        if not args.case and "case" in config:
-            args.case = config["case"]
-        if not args.case_name and "case_name" in config:
-            args.case_name = config["case_name"]
-        if not args.model and "model" in config:
-            args.model = config["model"]
-        if args.seed is None and "seed" in config:
-            args.seed = config["seed"]
-        if not args.attn_backend and "attn_backend" in config:
-            args.attn_backend = config["attn_backend"]
-        if not args.sparse_attn_backend and "sparse_attn_backend" in config:
-            args.sparse_attn_backend = config["sparse_attn_backend"]
-        if not args.spconv_algo and "spconv_algo" in config:
-            args.spconv_algo = config["spconv_algo"]
-        if args.preprocess is None and "preprocess" in config:
-            args.preprocess = config["preprocess"]
-        if not args.skip_render and config.get("skip_render", False):
-            args.skip_render = True
-        if not args.skip_glb and config.get("skip_glb", False):
-            args.skip_glb = True
-        if not args.skip_ply and config.get("skip_ply", False):
-            args.skip_ply = True
-        if not args.asset_dir and "asset_dir" in config:
-            args.asset_dir = config["asset_dir"]
-        if not args.render_dir and "render_dir" in config:
-            args.render_dir = config["render_dir"]
-        if not args.source_model and "source_model" in config:
-            args.source_model = config["source_model"]
-        if not args.source_image and "source_image" in config:
-            args.source_image = config["source_image"]
-        if not args.edit_image and "edit_image" in config:
-            args.edit_image = config["edit_image"]
-        if not args.mask_image and "mask_image" in config:
-            args.mask_image = config["mask_image"]
-        if not args.mask_glb and "mask_glb" in config:
-            args.mask_glb = config["mask_glb"]
-        if not args.source_prompt and "source_prompt" in config:
-            args.source_prompt = config["source_prompt"]
-        if not args.edit_prompt and "edit_prompt" in config:
-            args.edit_prompt = config["edit_prompt"]
-        if args.ss_steps is None and "ss_steps" in config:
-            args.ss_steps = config["ss_steps"]
-        if args.slat_steps is None and "slat_steps" in config:
-            args.slat_steps = config["slat_steps"]
-        if not args.device and "device" in config:
-            args.device = config["device"]
-
-        # Load method_args from config if present
-        if "method_args" in config and not extra_args:
-            method_args_dict = config["method_args"]
-            for key, value in method_args_dict.items():
-                extra_args.append(f"--{key}")
-                # 布尔值 True 转换为标志参数（不带值）
-                # None 或 False 跳过
-                # 其他值（包括空字符串 ""）都添加
-                if value is True:
-                    continue  # 标志参数，不添加值
-                elif value is not None and value is not False:
-                    extra_args.append(str(value))
-
-    if args.list_methods:
-        print_methods()
+    if args.list_entrypoints:
+        print_entrypoints()
         return 0
 
-    if args.init_case:
-        manifest_path = init_case_directory(Path(args.init_case))
-        print(f"Created editing case template: {manifest_path}")
-        print(f"Put source assets under: {manifest_path.parent / 'source'}")
-        print(f"Put edit assets under: {manifest_path.parent / 'edit'}")
-        return 0
+    if not args.entrypoint:
+        parser.error("--entrypoint is required unless --list-entrypoints is used.")
+    if not has_entrypoint(args.entrypoint):
+        parser.error(f"Unknown composable entrypoint: {args.entrypoint}")
 
-    if not args.method:
-        parser.error("--method is required unless --list-methods or --init-case is used.")
-
-    method = get_method(args.method)
-    case = load_case(args.case or None)
-    case = apply_case_overrides(
-        case,
-        case_name=args.case_name,
-        seed=args.seed,
-        asset_dir=args.asset_dir,
-        render_dir=args.render_dir,
-        source_model=args.source_model,
-        source_image=args.source_image,
-        edit_image=args.edit_image,
-        mask_image=args.mask_image,
-        mask_glb=args.mask_glb,
-        source_prompt=args.source_prompt,
-        edit_prompt=args.edit_prompt,
-    )
-    method.validate_case(case)
-
-    effective_case_name = sanitize_name(case.case_name, fallback=method.name)
-
-    # Choose default model based on method type
-    default_model = "microsoft/TRELLIS-text-large" if "text" in method.name else "microsoft/TRELLIS-image-large"
-    effective_model = resolve_effective_value(args.model, case.defaults, "model", default_model)
-    effective_seed = resolve_effective_value(case.seed, case.defaults, "seed")
-    if args.seed is not None:
-        effective_seed = args.seed
-    effective_preprocess = args.preprocess
-    if effective_preprocess is None and "preprocess" in case.defaults:
-        effective_preprocess = bool(case.defaults["preprocess"])
-
-    effective_attn_backend = resolve_effective_value(args.attn_backend, case.defaults, "attn_backend", "")
-    effective_sparse_attn_backend = resolve_effective_value(
-        args.sparse_attn_backend,
-        case.defaults,
-        "sparse_attn_backend",
-        "",
-    )
-    effective_spconv_algo = resolve_effective_value(args.spconv_algo, case.defaults, "spconv_algo", "native")
-    backend = build_backend_config(
-        attn_backend=str(effective_attn_backend or ""),
-        sparse_attn_backend=str(effective_sparse_attn_backend or ""),
-        spconv_algo=str(effective_spconv_algo or "native"),
-    )
-
-    method_defaults = case.method_defaults(method.name)
-    manifest_extra_args = method_defaults.get("args", [])
-    if manifest_extra_args and not isinstance(manifest_extra_args, list):
-        raise RuntimeError(
-            f"Manifest methods.{method.name}.args must be a list, got {type(manifest_extra_args).__name__}."
-        )
-
-    layout = build_experiment_output_layout(method.name, effective_case_name)
-
-    # Check if method has a method class implementation
-    if method.has_method_class():
-        print(f"Using method class for: {method.name}")
-        return run_method_class(
-            method_spec=method,
-            case=case,
-            effective_case_name=effective_case_name,
-            effective_model=str(effective_model),
-            effective_seed=effective_seed,
-            effective_preprocess=effective_preprocess,
-            backend=backend,
-            skip_render=bool(args.skip_render),
-            skip_glb=bool(args.skip_glb),
-            skip_ply=bool(args.skip_ply),
-            extra_args=extra_args,
-            ss_steps=args.ss_steps,
-            slat_steps=args.slat_steps,
-            device=args.device,
-        )
-
-    # Fallback to script-based execution (legacy)
-    print(f"Using legacy script for: {method.name}")
-    command = [
-        sys.executable,
-        str(method.script_path),
-        *method.build_command_args(
-            case=case,
-            case_name=effective_case_name,
-            model=str(effective_model),
-            seed=effective_seed,
-            preprocess=effective_preprocess,
-            attn_backend=backend.attn_backend,
-            skip_render=bool(args.skip_render),
-            skip_glb=bool(args.skip_glb),
-            skip_ply=bool(args.skip_ply),
-            extra_args=extra_args,
-            manifest_extra_args=manifest_extra_args,
-        ),
-    ]
-
-    runner_config = {
-        "runner": "run_edit_experiment.py",
-        "method_name": method.name,
-        "method_description": method.description,
-        "case_name": effective_case_name,
-        "model": str(effective_model),
-        "seed": effective_seed,
-        "preprocess": effective_preprocess,
-        "backend": backend.env,
-        "skip_render": bool(args.skip_render),
-        "skip_glb": bool(args.skip_glb),
-        "skip_ply": bool(args.skip_ply),
-        "case": summarize_case(case),
-        "manifest_method_args": manifest_extra_args,
-        "cli_passthrough_args": list(extra_args),
-        "resolved_command": command,
-        "output_case_dir": str(layout.case_dir),
-        "output_edit_dir": str(layout.edit_dir),
-        "output_artifacts_dir": str(layout.artifacts_dir),
-        "output_logs_dir": str(layout.logs_dir),
-    }
-
-    if args.dry_run:
-        print("Resolved case:")
-        for key, value in summarize_case(case).items():
-            print(f"  {key}: {value}")
-        print(f"Planned output: {layout.case_dir}")
-        print("Command:")
-        print("  " + " ".join(command))
-        return 0
-
-    ensure_dir(layout.case_dir)
-    ensure_dir(layout.artifacts_dir)
-    ensure_dir(layout.logs_dir)
-    write_json(layout.case_dir / "config.json", runner_config)
-    write_json(layout.artifacts_dir / "case_snapshot.json", case.snapshot())
-    write_json(layout.artifacts_dir / "runner_invocation.json", runner_config)
-    stdout_log = layout.logs_dir / "runner.stdout.log"
-    stderr_log = layout.logs_dir / "runner.stderr.log"
-    started_at = utc_now_iso()
-    write_json(
-        layout.case_dir / "status.json",
-        {
-            "status": "running",
-            "started_at": started_at,
-            "finished_at": None,
-            "elapsed_seconds": None,
-            "method_name": method.name,
-            "case_name": effective_case_name,
-            "output_case_dir": str(layout.case_dir),
-            "stdout_log": str(stdout_log),
-            "stderr_log": str(stderr_log),
-        },
-    )
-
-    env = apply_backend_env(backend)
-    start_time = time.time()
-    with stdout_log.open("w", encoding="utf-8") as stdout_handle, stderr_log.open("w", encoding="utf-8") as stderr_handle:
-        process = subprocess.run(
-            command,
-            cwd=str(REPO_ROOT),
-            env=env,
-            stdout=stdout_handle,
-            stderr=stderr_handle,
-            check=False,
-            text=True,
-        )
-    elapsed = round(time.time() - start_time, 3)
-    status = "succeeded" if process.returncode == 0 else "failed"
-    finished_at = utc_now_iso()
-    write_json(
-        layout.case_dir / "status.json",
-        {
-            "status": status,
-            "started_at": started_at,
-            "finished_at": finished_at,
-            "elapsed_seconds": elapsed,
-            "exit_code": process.returncode,
-            "method_name": method.name,
-            "case_name": effective_case_name,
-            "output_case_dir": str(layout.case_dir),
-            "output_edit_dir": str(layout.edit_dir),
-            "stdout_log": str(stdout_log),
-            "stderr_log": str(stderr_log),
-        },
-    )
-
-    if process.returncode == 0:
-        print(f"Experiment finished: {layout.case_dir}")
-        print(f"Method outputs: {layout.edit_dir}")
-        print(f"Status file: {layout.case_dir / 'status.json'}")
-        return 0
-
-    print(f"Experiment failed: {layout.case_dir}", file=sys.stderr)
-    print(f"Check logs: {stdout_log} and {stderr_log}", file=sys.stderr)
-    return process.returncode
+    return run_entrypoint(args.entrypoint, args, config_data)
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except RuntimeError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        print(f"Error: {exc}")
         raise SystemExit(1)

@@ -1,362 +1,296 @@
 #!/usr/bin/env python3
 """
-批量运行编辑实验并评测
+批量运行 composable 编辑实验并评测。
 
-直接从 Edit3D-Bench 数据集读取测试案例，运行编辑方法，生成结果并评测。
-结果直接保存到 /cache/wangxinxing/data/temp/{method_name}_{config_name}_{timestamp}/
+推荐使用 `--config edit_configs/template.config` 一类的结构化 YAML：
+- 顶层使用 `entrypoint`
+- 运行参数使用 `runtime`
+- 算法参数使用 `preprocess` / `ss` / `slat`
+- 批量评测参数使用 `batch`
 """
 
-import os
-import sys
-import json
-import time
-import shutil
+from __future__ import annotations
+
 import argparse
+import json
+import os
+import shutil
 import subprocess
-import yaml
-from pathlib import Path
+import sys
+import time
+from copy import deepcopy
 from datetime import datetime
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from trellis_edit.common import build_experiment_output_layout, ensure_dir
+from trellis_edit.composable import get_entrypoint, has_entrypoint
 
 
-def load_edit3d_metadata(gt_root: Path) -> List[Dict]:
-    """加载 Edit3D-Bench metadata"""
+DEFAULT_GT_ROOT = Path("/home/wangxinxing/code/Edit3Dpp/data")
+DEFAULT_PRED_ROOT = Path("/cache/wangxinxing/data/temp")
+DEFAULT_METRICS = ["psnr", "ssim", "lpips", "fid", "dino_if", "chamfer", "clip_t"]
+DEFAULT_BATCH_INPUT_TEMPLATES = {
+    "source_image": "{gt_root}/{dataset}/{object_name}/prompt_{prompt_id}/2d_render.png",
+    "edit_image": "{gt_root}/{dataset}/{object_name}/prompt_{prompt_id}/2d_edit.png",
+    "mask_image": "{gt_root}/{dataset}/{object_name}/prompt_{prompt_id}/2d_mask.png",
+    "mask_glb": "{gt_root}/{dataset}/{object_name}/prompt_{prompt_id}/3d_edit_region.glb",
+    "source_voxels": "{assets_root}/{dataset}/{object_name}/voxels.ply",
+    "source_features": "{assets_root}/{dataset}/{object_name}/features.npz",
+    "edited_coords": "",
+}
+INPUT_KEYS = (
+    "source_image",
+    "edit_image",
+    "mask_image",
+    "mask_glb",
+    "source_voxels",
+    "source_features",
+    "edited_coords",
+)
+
+
+def load_edit3d_metadata(gt_root: Path) -> list[dict[str, Any]]:
     metadata_path = gt_root / "metadata.json"
-    with open(metadata_path, "r") as f:
-        return json.load(f)
+    with open(metadata_path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
 
 
-def run_command(cmd: List[str], cwd: Optional[Path] = None, timeout: int = 3600) -> tuple[int, str, str]:
-    """运行命令"""
+def run_command(
+    cmd: list[str],
+    *,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+    timeout: int = 3600,
+) -> tuple[int, str, str]:
     print(f"[CMD] {' '.join(cmd)}")
     try:
-        result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
-        return result.returncode, result.stdout, result.stderr
+        result = subprocess.run(
+            cmd,
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
     except subprocess.TimeoutExpired:
         return -1, "", f"Timeout after {timeout}s"
-    except Exception as e:
-        return -1, "", str(e)
+    except Exception as exc:  # pragma: no cover - shell execution wrapper
+        return -1, "", str(exc)
+    return result.returncode, result.stdout, result.stderr
 
 
 def format_time(seconds: float) -> str:
-    """格式化时间"""
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
     secs = int(seconds % 60)
     if hours > 0:
         return f"{hours}h {minutes}m {secs}s"
-    elif minutes > 0:
+    if minutes > 0:
         return f"{minutes}m {secs}s"
-    else:
-        return f"{secs}s"
+    return f"{secs}s"
 
 
-def run_editing_and_eval(
-    gt_root: Path,
-    method_name: str,
-    config_name: str,
-    cases: List[tuple],
-    method_args: List[str],
-    seed: int,
-    device: str,
-    metrics: List[str],
-    skip_render: bool = False,
-    skip_exists: bool = True,
-    assets_root: Optional[Path] = None,
-) -> tuple[bool, Optional[Dict]]:
-    """批量运行编辑实验并评测"""
+def case_identifier(dataset: str, object_name: str, prompt_id: int) -> str:
+    safe_object_name = object_name.replace("/", "_").replace(" ", "_")
+    return f"{dataset}__{safe_object_name}__prompt_{prompt_id}"
 
-    # 使用固定的输出目录（不带时间戳）
-    output_root = Path("/cache/wangxinxing/data/temp") / f"{method_name}_{config_name}"
 
-    # 如果 skip_exists 为 False，清理旧数据
-    if not skip_exists and output_root.exists():
-        print(f"[INFO] 清理旧的输出目录: {output_root}")
-        shutil.rmtree(output_root)
+def resolve_template_value(template: str | None, variables: dict[str, str | None]) -> str | None:
+    if template in (None, ""):
+        return None
+    for key, value in variables.items():
+        token = "{" + key + "}"
+        if token in template and value in (None, ""):
+            return None
+    try:
+        return template.format_map(variables)
+    except KeyError as exc:
+        raise RuntimeError(f"Unknown batch input template key: {exc.args[0]} in '{template}'") from exc
 
-    output_root.mkdir(parents=True, exist_ok=True)
 
-    print("\n" + "="*80)
-    print(f"输出目录: {output_root}")
-    print(f"方法: {method_name}")
-    print(f"配置: {config_name}")
-    print(f"案例数量: {len(cases)}")
-    print(f"跳过已存在: {'是' if skip_exists else '否'}")
-    print("="*80)
+def coerce_existing_file(path_text: str | None) -> str | None:
+    if path_text in (None, ""):
+        return None
+    path = Path(path_text).expanduser().resolve()
+    if path.is_file():
+        return str(path)
+    return None
 
-    # 步骤 1: 批量运行所有编辑实验
-    print("\n" + "="*80)
-    print("步骤 1/4: 批量运行编辑实验")
-    print("="*80)
 
-    success_count = 0
-    skip_count = 0
-    for i, (dataset, object_name, prompt_id) in enumerate(cases, 1):
-        print(f"\n[{i}/{len(cases)}] 处理: {dataset}/{object_name}/prompt_{prompt_id}")
-
-        success = run_single_edit(
-            gt_root=gt_root,
-            output_root=output_root,
-            method_name=method_name,
-            dataset=dataset,
-            object_name=object_name,
-            prompt_id=prompt_id,
-            method_args=method_args,
-            seed=seed,
-            device=device,
-            skip_exists=skip_exists,
-            assets_root=assets_root,
+def stage_output_dir_name(entrypoint_name: str) -> str:
+    run_mode = get_entrypoint(entrypoint_name).run_mode
+    if run_mode == "ss":
+        raise RuntimeError(
+            f"Batch evaluation requires an entrypoint that produces final GLB outputs; '{entrypoint_name}' is ss-only."
         )
-
-        if success:
-            success_count += 1
-            # 检查是否是跳过的（已存在）
-            edit_glb = output_root / dataset / object_name / f"prompt_{prompt_id}" / "edit.glb"
-            if skip_exists and edit_glb.exists():
-                # 检查文件修改时间，如果是刚创建的则不算跳过
-                import time
-                if time.time() - edit_glb.stat().st_mtime > 60:  # 超过1分钟前创建的
-                    skip_count += 1
-
-    print(f"\n[INFO] 编辑完成: {success_count}/{len(cases)} 成功")
-    if skip_count > 0:
-        print(f"[INFO] 跳过已存在: {skip_count} 个")
-
-    if success_count == 0:
-        print("[ERROR] 没有成功的编辑结果")
-        return False, None
-
-    # 步骤 2: 统一渲染所有结果
-    if not skip_render:
-        print("\n" + "="*80)
-        print("步骤 2/4: 统一渲染所有结果")
-        print("="*80)
-
-        render_success = render_all_results(output_root, device)
-        if not render_success:
-            print("[WARNING] 渲染失败")
-    else:
-        print("\n[INFO] 跳过渲染步骤")
-
-    # 步骤 3: 统一评测
-    print("\n" + "="*80)
-    print("步骤 3/4: 运行评测")
-    print("="*80)
-
-    eval_output_dir = output_root / "evaluation_output"
-    success, results = run_evaluation(
-        gt_root=gt_root,
-        pred_root=output_root,
-        metrics=metrics,
-        output_dir=eval_output_dir,
-        device=device,
-    )
-
-    if not success:
-        print("[WARNING] 评测失败")
-        return True, None
-
-    return True, results
+    return "slat"
 
 
-def run_single_edit(
+def build_case_config(
+    *,
+    base_config: dict[str, Any],
+    entrypoint_name: str,
     gt_root: Path,
-    output_root: Path,
-    method_name: str,
+    pred_root: Path,
+    assets_root: Path | None,
     dataset: str,
     object_name: str,
     prompt_id: int,
-    method_args: List[str],
-    seed: int,
-    device: str = "cuda:0",
-    assets_root: Optional[Path] = None,
-    skip_exists: bool = True,
-) -> bool:
-    """运行单个编辑实验"""
+    model_override: str | None,
+    seed_override: int | None,
+    device_override: str | None,
+) -> tuple[dict[str, Any], str, Path]:
+    config = deepcopy(base_config)
+    batch_section = dict(config.get("batch") or {})
+    user_input_templates = dict(batch_section.get("input_templates") or {})
+    input_templates = dict(DEFAULT_BATCH_INPUT_TEMPLATES)
+    input_templates.update(user_input_templates)
 
-    # 构建输出路径
-    dataset_dir = output_root / dataset
-    object_dir = dataset_dir / object_name
-    prompt_dir = object_dir / f"prompt_{prompt_id}"
-    prompt_dir.mkdir(parents=True, exist_ok=True)
+    config.pop("batch", None)
+    config.pop("method", None)
+    config["entrypoint"] = entrypoint_name
 
-    # 检查是否已经生成过 edit.glb
-    edit_glb = prompt_dir / "edit.glb"
-    if skip_exists and edit_glb.exists():
-        print(f"[SKIP] edit.glb 已存在: {edit_glb}")
-        return True
+    work_root = (pred_root / "_runs").resolve()
+    case_name = case_identifier(dataset, object_name, prompt_id)
+    prompt_dir = gt_root / dataset / object_name / f"prompt_{prompt_id}"
+    variables = {
+        "gt_root": str(gt_root.resolve()),
+        "pred_root": str(pred_root.resolve()),
+        "assets_root": str(assets_root.resolve()) if assets_root is not None else None,
+        "dataset": dataset,
+        "object_name": object_name,
+        "prompt_id": str(prompt_id),
+        "prompt_dir": str(prompt_dir.resolve()),
+        "case_name": case_name,
+    }
 
-    # 获取输入文件路径
-    gt_object_dir = gt_root / dataset / object_name
-    source_image = gt_object_dir / f"prompt_{prompt_id}" / "2d_render.png"
-    edit_image = gt_object_dir / f"prompt_{prompt_id}" / "2d_edit.png"
-    mask_image = gt_object_dir / f"prompt_{prompt_id}" / "2d_mask.png"
-    mask_glb = gt_object_dir / f"prompt_{prompt_id}" / "3d_edit_region.glb"
+    runtime = dict(config.get("runtime") or {})
+    if model_override:
+        runtime["model"] = model_override
+    runtime.setdefault("model", "microsoft/TRELLIS-image-large")
+    runtime["case_name"] = case_name
+    runtime["output_root"] = str(work_root)
+    if seed_override is not None:
+        runtime["seed"] = seed_override
+    runtime.setdefault("seed", 1)
+    if device_override:
+        runtime["device"] = device_override
+    runtime.setdefault("device", "cuda:0")
+    runtime.setdefault("spconv_algo", "native")
+    runtime.setdefault("skip_render", True)
+    runtime.setdefault("skip_glb", False)
+    runtime.setdefault("skip_ply", False)
+    runtime.setdefault("save_source_outputs", False)
+    if runtime["skip_glb"]:
+        raise RuntimeError("Batch evaluation requires runtime.skip_glb=false so that edit.glb is produced.")
+    config["runtime"] = runtime
 
-    # 检查文件是否存在
-    if not all([source_image.exists(), edit_image.exists(), mask_image.exists()]):
-        print(f"[ERROR] 输入文件不存在")
-        return False
+    explicit_inputs = dict(config.get("inputs") or {})
+    resolved_inputs: dict[str, str | None] = {}
+    for key in INPUT_KEYS:
+        if key in user_input_templates:
+            resolved_inputs[key] = coerce_existing_file(
+                resolve_template_value(user_input_templates.get(key), variables)
+            )
+            continue
+        explicit_value = explicit_inputs.get(key)
+        if explicit_value not in (None, ""):
+            resolved_inputs[key] = coerce_existing_file(str(explicit_value))
+            continue
+        template_value = input_templates.get(key)
+        resolved_inputs[key] = coerce_existing_file(resolve_template_value(template_value, variables))
+    config["inputs"] = resolved_inputs
 
-    # 使用固定的临时案例名称
-    temp_case_name = "temp_edit"
-
-    # 构建命令
-    cmd = [
-        "python", "run_edit_experiment.py",
-        "--method", method_name,
-        "--case-name", temp_case_name,
-        "--source-image", str(source_image),
-        "--edit-image", str(edit_image),
-        "--mask-image", str(mask_image),
-        "--seed", str(seed),
-    ]
-
-    # 使用已有的 assets 或预处理
-    if assets_root:
-        asset_dir = assets_root / dataset / object_name
-        if asset_dir.exists():
-            cmd.extend(["--asset-dir", str(asset_dir)])
-        else:
-            print(f"[WARNING] Assets 不存在: {asset_dir}，将使用预处理")
-            source_model = gt_object_dir / "source_model" / "model.glb"
-            if source_model.exists():
-                cmd.extend(["--source-model", str(source_model), "--preprocess"])
-            else:
-                print(f"[ERROR] 找不到 source model: {source_model}")
-                return False
-    else:
-        source_model = gt_object_dir / "source_model" / "model.glb"
-        if source_model.exists():
-            cmd.extend(["--source-model", str(source_model), "--preprocess"])
-        else:
-            print(f"[ERROR] 找不到 source model: {source_model}")
-            return False
-
-    if mask_glb.exists():
-        cmd.extend(["--mask-glb", str(mask_glb)])
-
-    # 添加设备参数
-    cmd.extend(["--device", device])
-
-    # 添加方法参数
-    cmd.extend(method_args)
-
-    # 清理临时输出
-    temp_output_dir = Path(f"outputs/{method_name}/{temp_case_name}")
-    if temp_output_dir.exists():
-        shutil.rmtree(temp_output_dir)
-
-    returncode, stdout, stderr = run_command(cmd, timeout=7200)
-
-    if returncode != 0:
-        print(f"[ERROR] 编辑实验失败")
-        return False
-
-    # 找到生成的 GLB
-    temp_glb = Path(f"outputs/{method_name}/{temp_case_name}/edit/sample_00.glb")
-    if not temp_glb.exists():
-        print(f"[ERROR] 找不到生成的 GLB: {temp_glb}")
-        return False
-
-    # 复制到评测目录
-    edit_glb = prompt_dir / "edit.glb"
-    shutil.copy2(temp_glb, edit_glb)
-    print(f"[SUCCESS] GLB 已保存: {edit_glb}")
-
-    # 清理临时输出
-    if temp_output_dir.exists():
-        shutil.rmtree(temp_output_dir)
-
-    return True
+    layout = build_experiment_output_layout(entrypoint_name, case_name, outputs_root=work_root)
+    expected_glb = layout.edit_dir / stage_output_dir_name(entrypoint_name) / "sample_00.glb"
+    return config, case_name, expected_glb
 
 
 def render_all_results(output_root: Path, device: str = "cuda:0") -> bool:
-    """统一渲染所有结果"""
-
     render_dir = Path("VoxHammer/Edit3D-Bench")
     if not render_dir.exists():
         render_dir = Path("../VoxHammer/Edit3D-Bench")
-
     if not render_dir.exists():
         print("[ERROR] 找不到渲染脚本")
         return False
 
     env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = device.replace("cuda:", "")
+    if device.startswith("cuda:"):
+        env["CUDA_VISIBLE_DEVICES"] = device.replace("cuda:", "")
 
-    cmd = ["python", "render.py", "--base_dir", str(output_root.resolve())]
-    returncode, stdout, stderr = run_command(cmd, cwd=render_dir, timeout=7200)
-
-    print(stdout)
+    cmd = [sys.executable, "render.py", "--base_dir", str(output_root.resolve())]
+    returncode, stdout, stderr = run_command(cmd, cwd=render_dir, env=env, timeout=7200)
+    if stdout:
+        print(stdout)
     if stderr:
         print(f"[STDERR] {stderr}")
-
     return returncode == 0
 
 
 def run_evaluation(
+    *,
     gt_root: Path,
     pred_root: Path,
-    metrics: List[str],
+    metrics: list[str],
     output_dir: Path,
     device: str = "cuda:0",
-) -> tuple[bool, Optional[Dict]]:
-    """运行评测"""
-
+) -> tuple[bool, dict[str, Any] | None]:
     eval_script = Path("VoxHammer/Edit3D-Bench/eval_main.py")
     if not eval_script.exists():
         eval_script = Path("../VoxHammer/Edit3D-Bench/eval_main.py")
-
     if not eval_script.exists():
         print("[ERROR] 找不到评测脚本")
         return False, None
 
     cmd = [
-        "python", str(eval_script),
-        "--gt_root", str(gt_root),
-        "--pred_root", str(pred_root),
-        "--metrics", *metrics,
-        "--device", device,
-        "--batch_size", "32",
-        "--output_dir", str(output_dir),
+        sys.executable,
+        str(eval_script),
+        "--gt_root",
+        str(gt_root),
+        "--pred_root",
+        str(pred_root),
+        "--metrics",
+        *metrics,
+        "--device",
+        device,
+        "--batch_size",
+        "32",
+        "--output_dir",
+        str(output_dir),
     ]
-
     returncode, stdout, stderr = run_command(cmd, timeout=7200)
-
-    print(stdout)
+    if stdout:
+        print(stdout)
     if stderr:
         print(f"[STDERR] {stderr}")
-
     if returncode != 0:
         return False, None
 
     summary_file = output_dir / "summary.json"
-    if summary_file.exists():
-        with open(summary_file, "r") as f:
-            results = json.load(f)
-        return True, results
-
-    return False, None
+    if not summary_file.exists():
+        return False, None
+    with open(summary_file, "r", encoding="utf-8") as handle:
+        return True, json.load(handle)
 
 
 def save_results(
+    *,
     output_root: Path,
-    method_name: str,
+    entrypoint_name: str,
     config_name: str,
-    results: Optional[Dict],
+    results: dict[str, Any] | None,
     total_time: float,
-):
-    """保存评测结果"""
+) -> None:
     print("\n[4/4] 保存结果...")
-
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir = Path("outputs/results") / f"{method_name}_{config_name}_{timestamp}"
-    results_dir.mkdir(parents=True, exist_ok=True)
+    results_dir = Path("outputs/results") / f"{entrypoint_name}_{config_name}_{timestamp}"
+    ensure_dir(results_dir)
 
-    # 保存完整结果
     full_results = {
-        "method_name": method_name,
+        "entrypoint": entrypoint_name,
         "config_name": config_name,
         "timestamp": timestamp,
         "datetime": datetime.now().isoformat(),
@@ -365,273 +299,426 @@ def save_results(
         "output_root": str(output_root),
         "evaluation_results": results,
     }
+    with open(results_dir / "evaluation_results.json", "w", encoding="utf-8") as handle:
+        json.dump(full_results, handle, indent=2, ensure_ascii=False)
 
-    results_file = results_dir / "evaluation_results.json"
-    with open(results_file, "w") as f:
-        json.dump(full_results, f, indent=2, ensure_ascii=False)
-
-    # 生成可读报告
     report_file = results_dir / "report.txt"
-    with open(report_file, "w") as f:
-        f.write("="*80 + "\n")
-        f.write("Edit3D-Bench 评测报告\n")
-        f.write("="*80 + "\n\n")
-
-        f.write(f"方法: {method_name}\n")
-        f.write(f"配置: {config_name}\n")
-        f.write(f"评测时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"总耗时: {format_time(total_time)}\n")
-        f.write(f"数据位置: {output_root}\n\n")
+    with open(report_file, "w", encoding="utf-8") as handle:
+        handle.write("=" * 80 + "\n")
+        handle.write("Edit3D-Bench 评测报告\n")
+        handle.write("=" * 80 + "\n\n")
+        handle.write(f"Entrypoint: {entrypoint_name}\n")
+        handle.write(f"配置: {config_name}\n")
+        handle.write(f"评测时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        handle.write(f"总耗时: {format_time(total_time)}\n")
+        handle.write(f"数据位置: {output_root}\n\n")
 
         if results and "results" in results:
-            f.write("="*80 + "\n")
-            f.write("评测指标结果\n")
-            f.write("="*80 + "\n\n")
-
+            handle.write("=" * 80 + "\n")
+            handle.write("评测指标结果\n")
+            handle.write("=" * 80 + "\n\n")
             for metric, values in results["results"].items():
-                f.write(f"{metric.upper()}:\n")
+                handle.write(f"{metric.upper()}:\n")
                 if isinstance(values, dict):
-                    if "mean" in values and values["mean"] is not None:
-                        f.write(f"  均值: {values['mean']:.4f}\n")
-                    if "std" in values and values["std"] is not None:
-                        f.write(f"  标准差: {values['std']:.4f}\n")
-                    if "count" in values and values["count"] is not None:
-                        f.write(f"  样本数: {values['count']}\n")
+                    if values.get("mean") is not None:
+                        handle.write(f"  均值: {values['mean']:.4f}\n")
+                    if values.get("std") is not None:
+                        handle.write(f"  标准差: {values['std']:.4f}\n")
+                    if values.get("count") is not None:
+                        handle.write(f"  样本数: {values['count']}\n")
                 elif values is not None:
-                    f.write(f"  值: {values:.4f}\n")
+                    handle.write(f"  值: {values:.4f}\n")
                 else:
-                    f.write(f"  值: N/A\n")
-                f.write("\n")
+                    handle.write("  值: N/A\n")
+                handle.write("\n")
 
     print(f"[INFO] 结果已保存到: {results_dir}")
     print(f"[INFO] - 报告: {report_file}")
     print(f"[INFO] - 数据: {output_root}")
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="批量运行编辑实验并评测",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+def run_single_edit(
+    *,
+    gt_root: Path,
+    pred_root: Path,
+    entrypoint_name: str,
+    dataset: str,
+    object_name: str,
+    prompt_id: int,
+    base_config: dict[str, Any],
+    assets_root: Path | None,
+    skip_exists: bool,
+    keep_case_outputs: bool,
+    model_override: str | None,
+    seed_override: int | None,
+    device_override: str | None,
+    dry_run: bool,
+) -> tuple[bool, bool]:
+    prompt_eval_dir = pred_root / dataset / object_name / f"prompt_{prompt_id}"
+    ensure_dir(prompt_eval_dir)
+    final_glb = prompt_eval_dir / "edit.glb"
+    if skip_exists and final_glb.exists():
+        print(f"[SKIP] edit.glb 已存在: {final_glb}")
+        return True, True
+
+    case_config, case_name, expected_glb = build_case_config(
+        base_config=base_config,
+        entrypoint_name=entrypoint_name,
+        gt_root=gt_root,
+        pred_root=pred_root,
+        assets_root=assets_root,
+        dataset=dataset,
+        object_name=object_name,
+        prompt_id=prompt_id,
+        model_override=model_override,
+        seed_override=seed_override,
+        device_override=device_override,
     )
 
-    # 配置文件或命令行参数
-    parser.add_argument("--config", type=str,
-                        help="YAML 配置文件路径（推荐）")
+    config_dir = ensure_dir(pred_root / "_batch_configs")
+    config_path = config_dir / f"{case_name}.yaml"
+    config_path.write_text(
+        yaml.safe_dump(case_config, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
 
-    # 必需参数（如果不使用配置文件）
-    parser.add_argument("--gt-root", type=str,
-                        help="Edit3D-Bench GT 数据根目录")
-    parser.add_argument("--method-name", type=str,
-                        help="方法名称")
-    parser.add_argument("--config-name", type=str,
-                        help="配置名称（用于标识不同的参数配置）")
+    if dry_run:
+        print(f"[DRY-RUN] Case config for {case_name}:")
+        print(config_path.read_text(encoding="utf-8"))
+        return True, False
 
-    # 数据过滤
-    parser.add_argument("--dataset", type=str,
-                        help="数据集过滤（例如：GSO）")
-    parser.add_argument("--object", type=str,
-                        help="物体名称过滤")
-    parser.add_argument("--prompt-id", type=int, choices=[1, 2, 3],
-                        help="提示ID过滤")
-    parser.add_argument("--max-cases", type=int,
-                        help="限制处理的案例数量")
+    case_output_dir = expected_glb.parents[2]
+    if case_output_dir.exists() and not skip_exists:
+        shutil.rmtree(case_output_dir)
 
-    # 方法参数
-    parser.add_argument("--seed", type=int, default=1,
-                        help="随机种子")
-    parser.add_argument("--assets-root", type=str,
-                        help="预处理的 assets 根目录（如 /cache/wangxinxing/data/temp/renders）")
-    parser.add_argument("--method-args", nargs=argparse.REMAINDER,
-                        help="传递给编辑方法的参数")
+    command = [sys.executable, "run_edit_experiment.py", "--config", str(config_path)]
+    returncode, stdout, stderr = run_command(command, timeout=7200)
+    if returncode != 0:
+        print(f"[ERROR] 编辑实验失败: {dataset}/{object_name}/prompt_{prompt_id}")
+        if stdout:
+            print(stdout)
+        if stderr:
+            print(stderr)
+        return False, False
 
-    # 评测参数
-    parser.add_argument("--metrics", nargs="+",
-                        default=["psnr", "ssim", "lpips", "fid", "dino_if", "chamfer", "clip_t"],
-                        help="评测指标")
-    parser.add_argument("--device", type=str, default="cuda:0",
-                        help="计算设备")
-    parser.add_argument("--skip-render", action="store_true",
-                        help="跳过渲染")
-    parser.add_argument("--skip-exists", action="store_true", default=True,
-                        help="跳过已存在的 edit.glb 文件（默认启用）")
-    parser.add_argument("--no-skip-exists", dest="skip_exists", action="store_false",
-                        help="不跳过已存在的文件，重新生成所有结果")
+    if stdout:
+        print(stdout)
+    if stderr:
+        print(stderr)
 
+    if not expected_glb.is_file():
+        print(f"[ERROR] 找不到生成的 GLB: {expected_glb}")
+        return False, False
+
+    shutil.copy2(expected_glb, final_glb)
+    print(f"[SUCCESS] GLB 已保存: {final_glb}")
+    if not keep_case_outputs and case_output_dir.exists():
+        shutil.rmtree(case_output_dir)
+        print(f"[CLEANUP] 已删除单 case 完整输出: {case_output_dir}")
+    return True, False
+
+
+def run_editing_and_eval(
+    *,
+    gt_root: Path,
+    pred_root: Path,
+    entrypoint_name: str,
+    config_name: str,
+    base_config: dict[str, Any],
+    cases: list[tuple[str, str, int]],
+    assets_root: Path | None,
+    metrics: list[str],
+    device: str,
+    skip_benchmark_render: bool,
+    skip_exists: bool,
+    keep_case_outputs: bool,
+    model_override: str | None,
+    seed_override: int | None,
+    dry_run: bool,
+) -> tuple[bool, dict[str, Any] | None]:
+    if not skip_exists and pred_root.exists():
+        print(f"[INFO] 清理旧的输出目录: {pred_root}")
+        shutil.rmtree(pred_root)
+    ensure_dir(pred_root)
+
+    print("\n" + "=" * 80)
+    print(f"输出目录: {pred_root}")
+    print(f"Entrypoint: {entrypoint_name}")
+    print(f"配置: {config_name}")
+    print(f"案例数量: {len(cases)}")
+    print(f"跳过已存在: {'是' if skip_exists else '否'}")
+    print(f"保留单 case 输出: {'是' if keep_case_outputs else '否'}")
+    print("=" * 80)
+
+    success_count = 0
+    skip_count = 0
+    print("\n" + "=" * 80)
+    print("步骤 1/4: 批量运行 composable 编辑实验")
+    print("=" * 80)
+
+    for index, (dataset, object_name, prompt_id) in enumerate(cases, start=1):
+        print(f"\n[{index}/{len(cases)}] 处理: {dataset}/{object_name}/prompt_{prompt_id}")
+        success, skipped = run_single_edit(
+            gt_root=gt_root,
+            pred_root=pred_root,
+            entrypoint_name=entrypoint_name,
+            dataset=dataset,
+            object_name=object_name,
+            prompt_id=prompt_id,
+            base_config=base_config,
+            assets_root=assets_root,
+            skip_exists=skip_exists,
+            keep_case_outputs=keep_case_outputs,
+            model_override=model_override,
+            seed_override=seed_override,
+            device_override=device,
+            dry_run=dry_run,
+        )
+        if not success:
+            continue
+        success_count += 1
+        if skipped:
+            skip_count += 1
+        if dry_run:
+            print("[DRY-RUN] 仅展示首个 case 的解析配置，提前结束。")
+            return True, None
+
+    print(f"\n[INFO] 编辑完成: {success_count}/{len(cases)} 成功")
+    if skip_count > 0:
+        print(f"[INFO] 跳过已存在: {skip_count} 个")
+    if success_count == 0:
+        print("[ERROR] 没有成功的编辑结果")
+        return False, None
+
+    if skip_benchmark_render:
+        print("\n[INFO] 跳过 Edit3D-Bench 渲染步骤")
+    else:
+        print("\n" + "=" * 80)
+        print("步骤 2/4: 统一渲染所有结果")
+        print("=" * 80)
+        render_success = render_all_results(pred_root, device)
+        if not render_success:
+            print("[WARNING] 渲染失败")
+
+    print("\n" + "=" * 80)
+    print("步骤 3/4: 运行评测")
+    print("=" * 80)
+    eval_output_dir = pred_root / "evaluation_output"
+    success, results = run_evaluation(
+        gt_root=gt_root,
+        pred_root=pred_root,
+        metrics=metrics,
+        output_dir=eval_output_dir,
+        device=device,
+    )
+    if not success:
+        print("[WARNING] 评测失败")
+        return True, None
+    return True, results
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="批量运行 composable 编辑实验并评测",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--config", type=str, help="结构化 YAML 配置文件路径（推荐）")
+    parser.add_argument("--entrypoint", type=str, help="Composable entrypoint 名称")
+    parser.add_argument("--gt-root", type=str, help="Edit3D-Bench GT 数据根目录")
+    parser.add_argument("--config-name", type=str, help="本次批量评测的配置标识")
+    parser.add_argument("--assets-root", type=str, help="源 3D 资产根目录，通常包含 voxels.ply 和 features.npz")
+    parser.add_argument("--pred-root", type=str, help="批量评测输出根目录")
+    parser.add_argument("--dataset", type=str, help="数据集过滤，例如 GSO")
+    parser.add_argument("--object", type=str, help="物体名称过滤")
+    parser.add_argument("--prompt-id", type=int, choices=[1, 2, 3], help="提示 ID 过滤")
+    parser.add_argument("--max-cases", type=int, help="限制处理的案例数量")
+    parser.add_argument("--model", type=str, help="覆盖 runtime.model")
+    parser.add_argument("--seed", type=int, help="覆盖 runtime.seed")
+    parser.add_argument("--device", type=str, help="覆盖 runtime.device 和评测 device")
+    parser.add_argument("--metrics", nargs="+", help="覆盖评测指标")
+    parser.add_argument("--skip-render", action="store_true", help="跳过 Edit3D-Bench 渲染步骤")
+    skip_exists_group = parser.add_mutually_exclusive_group()
+    skip_exists_group.add_argument("--skip-exists", dest="skip_exists", action="store_true", help="跳过已存在的 edit.glb")
+    skip_exists_group.add_argument(
+        "--no-skip-exists",
+        dest="skip_exists",
+        action="store_false",
+        help="不跳过已存在的文件，重新生成所有结果",
+    )
+    parser.set_defaults(skip_exists=None)
+    keep_outputs_group = parser.add_mutually_exclusive_group()
+    keep_outputs_group.add_argument(
+        "--keep-case-outputs",
+        dest="keep_case_outputs",
+        action="store_true",
+        help="保留 _runs/<entrypoint>/<case>/ 下的完整单 case 输出",
+    )
+    keep_outputs_group.add_argument(
+        "--drop-case-outputs",
+        dest="keep_case_outputs",
+        action="store_false",
+        help="复制最终 edit.glb 后删除单 case 完整输出，仅保留评测所需文件",
+    )
+    parser.set_defaults(keep_case_outputs=None)
+    parser.add_argument("--dry-run", action="store_true", help="只打印首个 case 解析后的 run_edit_experiment 配置")
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
     args = parser.parse_args()
 
-    # 如果提供了配置文件，从配置文件加载参数
+    config_data: dict[str, Any] = {}
+    batch_config: dict[str, Any] = {}
     if args.config:
         config_path = Path(args.config)
         if not config_path.exists():
             print(f"[ERROR] 配置文件不存在: {config_path}")
             return 1
+        with open(config_path, "r", encoding="utf-8") as handle:
+            config_data = yaml.safe_load(handle) or {}
+        if not isinstance(config_data, dict):
+            raise RuntimeError("批量配置文件必须是 YAML mapping")
+        batch_config = dict(config_data.get("batch") or {})
+        legacy_keys = [key for key in ("method_name", "method_args") if key in config_data]
+        if legacy_keys:
+            raise RuntimeError(
+                "Legacy batch config keys are no longer supported: "
+                + ", ".join(legacy_keys)
+                + ". Use entrypoint + runtime/inputs/preprocess/ss/slat + batch."
+            )
 
-        with open(config_path, "r") as f:
-            config = yaml.safe_load(f)
+    entrypoint_name = args.entrypoint or config_data.get("entrypoint")
+    if not entrypoint_name:
+        print("[ERROR] 必须提供 entrypoint（CLI 或 YAML 顶层 entrypoint）")
+        return 1
+    if not has_entrypoint(entrypoint_name):
+        print(f"[ERROR] Unknown composable entrypoint: {entrypoint_name}")
+        return 1
 
-        # 从配置文件读取参数（命令行参数优先）
-        gt_root = Path(config.get("gt_root", "/home/wangxinxing/code/Edit3Dpp/data"))
-        method_name = config.get("method_name")
-        config_name = config.get("config_name")
-        dataset = config.get("dataset")
-        object_name = config.get("object")
-        prompt_id = config.get("prompt_id")
-        max_cases = config.get("max_cases")
-        seed = config.get("seed", 1)
-        assets_root = Path(config["assets_root"]) if config.get("assets_root") else None
-        metrics = config.get("metrics", ["psnr", "ssim", "lpips", "fid", "dino_if", "chamfer", "clip_t"])
-        device = config.get("device", "cuda:0")
-        skip_render = config.get("skip_render", False)
-        skip_exists = config.get("skip_exists", True)
+    gt_root = Path(args.gt_root or batch_config.get("gt_root") or DEFAULT_GT_ROOT).expanduser().resolve()
+    config_name = args.config_name or batch_config.get("config_name") or entrypoint_name
+    dataset = args.dataset or batch_config.get("dataset")
+    object_name = args.object or batch_config.get("object")
+    prompt_id = args.prompt_id or batch_config.get("prompt_id")
+    max_cases = args.max_cases if args.max_cases is not None else batch_config.get("max_cases")
+    assets_root_text = args.assets_root or batch_config.get("assets_root")
+    assets_root = Path(assets_root_text).expanduser().resolve() if assets_root_text else None
+    pred_root_text = args.pred_root or batch_config.get("pred_root")
+    pred_root = Path(pred_root_text).expanduser().resolve() if pred_root_text else (
+        DEFAULT_PRED_ROOT / f"{entrypoint_name}_{config_name}"
+    ).resolve()
+    metrics = args.metrics or batch_config.get("metrics") or DEFAULT_METRICS
+    device = args.device or config_data.get("runtime", {}).get("device") or batch_config.get("device") or "cuda:0"
+    skip_benchmark_render = args.skip_render or bool(batch_config.get("skip_benchmark_render", False))
+    skip_exists = args.skip_exists
+    if skip_exists is None:
+        skip_exists = bool(batch_config.get("skip_exists", True))
+    keep_case_outputs = args.keep_case_outputs
+    if keep_case_outputs is None:
+        keep_case_outputs = bool(batch_config.get("keep_case_outputs", False))
 
-        # 转换 method_args 从字典到命令行参数列表
-        method_args = []
-        if "method_args" in config:
-            for key, value in config["method_args"].items():
-                method_args.append(f"--{key}")
-                # 布尔值 True 转换为标志参数（不带值）
-                # None 或 False 跳过
-                # 其他值（包括空字符串 ""）都添加
-                if value is True:
-                    continue  # 标志参数，不添加值
-                elif value is not None and value is not False:
-                    method_args.append(str(value))
+    if not gt_root.exists():
+        print(f"[ERROR] GT 数据根目录不存在: {gt_root}")
+        return 1
 
-        # 命令行参数覆盖配置文件
-        if args.gt_root:
-            gt_root = Path(args.gt_root)
-        if args.method_name:
-            method_name = args.method_name
-        if args.config_name:
-            config_name = args.config_name
-        if args.dataset:
-            dataset = args.dataset
-        if args.object:
-            object_name = args.object
-        if args.prompt_id:
-            prompt_id = args.prompt_id
-        if args.max_cases:
-            max_cases = args.max_cases
-        if args.assets_root:
-            assets_root = Path(args.assets_root)
-        if args.method_args:
-            method_args = args.method_args
+    runtime_defaults = dict(config_data.get("runtime") or {})
+    model_override = args.model or runtime_defaults.get("model")
+    seed_override = args.seed if args.seed is not None else runtime_defaults.get("seed")
+    if seed_override is not None:
+        seed_override = int(seed_override)
 
-    else:
-        # 使用命令行参数
-        if not all([args.gt_root, args.method_name, args.config_name]):
-            print("[ERROR] 必须提供 --config 或 (--gt-root, --method-name, --config-name)")
-            return 1
-
-        gt_root = Path(args.gt_root)
-        method_name = args.method_name
-        config_name = args.config_name
-        dataset = args.dataset
-        object_name = args.object
-        prompt_id = args.prompt_id
-        max_cases = args.max_cases
-        seed = args.seed
-        assets_root = Path(args.assets_root) if args.assets_root else None
-        metrics = args.metrics
-        device = args.device
-        skip_render = args.skip_render
-        skip_exists = args.skip_exists
-        method_args = args.method_args or []
-
-    print("="*80)
-    print("批量运行编辑实验并评测")
-    print("="*80)
-    print(f"方法: {method_name}")
+    print("=" * 80)
+    print("批量运行 composable 编辑实验并评测")
+    print("=" * 80)
+    print(f"Entrypoint: {entrypoint_name}")
     print(f"配置: {config_name}")
     print(f"GT 数据: {gt_root}")
+    print(f"预测输出: {pred_root}")
+    if assets_root is not None:
+        print(f"源资产: {assets_root}")
     if dataset:
         print(f"数据集过滤: {dataset}")
     if object_name:
         print(f"物体过滤: {object_name}")
     if prompt_id:
-        print(f"提示ID过滤: {prompt_id}")
+        print(f"提示 ID 过滤: {prompt_id}")
     if max_cases:
         print(f"案例限制: {max_cases}")
-    print(f"方法参数: {method_args or '(默认)'}")
-    print("="*80)
+    print(f"评测指标: {metrics}")
+    print("=" * 80)
 
-    # 加载 metadata
-    print(f"\n[INFO] 加载 metadata...")
     metadata = load_edit3d_metadata(gt_root)
-
-    # 过滤案例
-    cases = []
+    cases: list[tuple[str, str, int]] = []
     for entry in metadata:
         entry_dataset = entry.get("dataset")
         entry_object_name = entry.get("source_model")
-
         if not entry_dataset or not entry_object_name:
             continue
-
         if dataset and entry_dataset != dataset:
             continue
         if object_name and entry_object_name != object_name:
             continue
-
-        # 处理三个 prompt
-        for pid in [1, 2, 3]:
-            if prompt_id and pid != prompt_id:
+        for candidate_prompt_id in (1, 2, 3):
+            if prompt_id and candidate_prompt_id != prompt_id:
                 continue
-
-            prompt_key = f"prompt_{pid}"
-            if prompt_key in entry and entry[prompt_key]:
-                cases.append((entry_dataset, entry_object_name, pid))
+            prompt_key = f"prompt_{candidate_prompt_id}"
+            if entry.get(prompt_key):
+                cases.append((entry_dataset, entry_object_name, candidate_prompt_id))
 
     if max_cases:
-        cases = cases[:max_cases]
-
+        cases = cases[: int(max_cases)]
     print(f"[INFO] 找到 {len(cases)} 个案例")
+    if not cases:
+        print("[ERROR] 没有匹配的案例")
+        return 1
 
-    # 处理案例
-    start_time = time.time()
-
-    success, results = run_editing_and_eval(
-        gt_root=gt_root,
-        method_name=method_name,
-        config_name=config_name,
-        cases=cases,
-        method_args=method_args,
-        seed=seed,
-        device=device,
-        metrics=metrics,
-        skip_render=skip_render,
-        skip_exists=skip_exists,
-        assets_root=assets_root,
+    ensure_dir(pred_root)
+    (pred_root / "_batch_source_config.yaml").write_text(
+        yaml.safe_dump(config_data or {"entrypoint": entrypoint_name, "batch": batch_config}, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
     )
 
+    start_time = time.time()
+    success, results = run_editing_and_eval(
+        gt_root=gt_root,
+        pred_root=pred_root,
+        entrypoint_name=entrypoint_name,
+        config_name=config_name,
+        base_config=config_data or {"entrypoint": entrypoint_name},
+        cases=cases,
+        assets_root=assets_root,
+        metrics=list(metrics),
+        device=device,
+        skip_benchmark_render=skip_benchmark_render,
+        skip_exists=skip_exists,
+        keep_case_outputs=keep_case_outputs,
+        model_override=model_override,
+        seed_override=seed_override,
+        dry_run=args.dry_run,
+    )
     if not success:
         print("[ERROR] 处理失败")
         return 1
 
     total_time = time.time() - start_time
-
-    # 保存结果
-    output_root = Path("/cache/wangxinxing/data/temp") / f"{method_name}_{config_name}"
-
-    if results:
+    if results is not None:
         save_results(
-            output_root=output_root,
-            method_name=method_name,
+            output_root=pred_root,
+            entrypoint_name=entrypoint_name,
             config_name=config_name,
             results=results,
             total_time=total_time,
         )
 
-    # 打印总结
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("批量处理完成")
-    print("="*80)
+    print("=" * 80)
     print(f"总耗时: {format_time(total_time)}")
-    print(f"输出目录: {output_root}")
-    print("="*80)
-
+    print(f"输出目录: {pred_root}")
+    print("=" * 80)
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

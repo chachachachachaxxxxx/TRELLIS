@@ -1,14 +1,14 @@
 # ============================================================
-# 单 case 示例：P2P + latent blend 全流程
+# 最小批量验证配置
 #
 # 用法:
-#   python run_edit_experiment.py --config edit_configs/single/image_p2p_example.yaml
+#   python run_batch_edit_and_eval.py --config edit_configs/quick_test_batch.yaml --dry-run
+#   python run_batch_edit_and_eval.py --config edit_configs/quick_test_batch.yaml
 # ============================================================
 
 entrypoint: p2p_latent_blend_full
 
 runtime:
-  case_name: test_edit
   model: microsoft/TRELLIS-image-large
   seed: 1
   device: cuda:0
@@ -16,14 +16,6 @@ runtime:
   skip_render: true
   skip_glb: false
   skip_ply: false
-
-inputs:
-  source_image: assets/edit_example/images/2d_render.png
-  edit_image: assets/edit_example/images/2d_edit.png
-  mask_image: assets/edit_example/images/2d_mask.png
-  mask_glb: assets/edit_example/mask.glb
-  source_voxels: assets/edit_example/voxels.ply
-  source_features: assets/edit_example/features.npz
 
 preprocess:
   crop_policy: union_crop
@@ -43,3 +35,19 @@ slat:
   inversion_mode: simple
   blend_enabled: true
   skip_source_decode: true
+
+batch:
+  config_name: quick_test
+  gt_root: /home/wangxinxing/code/Edit3Dpp/data
+  assets_root: /cache/wangxinxing/data/temp/renders
+  pred_root: /cache/wangxinxing/data/temp/p2p_latent_blend_quick_test
+  dataset: GSO
+  object: Avengers_Gamma_Green_Smash_Fists
+  prompt_id: 3
+  max_cases: 1
+  metrics:
+    - dino_if
+    - clip_t
+  skip_benchmark_render: false
+  skip_exists: false
+  keep_case_outputs: false

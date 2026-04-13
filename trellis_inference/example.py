@@ -1,5 +1,10 @@
 import os
+import sys
 from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 # os.environ['ATTN_BACKEND'] = 'xformers'   # Can be 'flash-attn' or 'xformers', default is 'flash-attn'
 os.environ['SPCONV_ALGO'] = 'native'        # Can be 'native' or 'auto', default is 'auto'.
                                             # 'auto' is faster but will do benchmarking at the beginning.
@@ -16,7 +21,7 @@ pipeline = TrellisImageTo3DPipeline.from_pretrained("microsoft/TRELLIS-image-lar
 pipeline.cuda()
 
 # Load an image
-image_path = Path("assets/3D_Dollhouse_Happy_Brother_p1.png")
+image_path = Path("assets/3D Dollhouse Happy Brother p2.png")
 image = Image.open(image_path)
 output_dir = build_output_layout("image_to_3d", image_path.stem).case_dir
 output_dir.mkdir(parents=True, exist_ok=True)

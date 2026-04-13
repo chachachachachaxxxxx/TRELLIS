@@ -1,0 +1,31 @@
+# ============================================================
+# p2p_latent_blend_ss — Avengers_Gamma_Green_Smash_Fists_prompt_3
+#
+# 在 TRELLIS_EDIT 目录下:
+#   python run_edit_experiment.py --config edit_configs/ss_examples/avengers_gamma_green_smash_fists_prompt_3.yaml
+# ============================================================
+
+entrypoint: p2p_latent_blend_ss
+
+runtime:
+  case_name: Avengers_Gamma_Green_Smash_Fists_prompt_3
+  model: microsoft/TRELLIS-image-large
+  seed: 1
+  device: cuda:0
+  spconv_algo: native
+
+inputs:
+  source_image: assets/Avengers_Gamma_Green_Smash_Fists_prompt_3/images/2d_render.png
+  edit_image: assets/Avengers_Gamma_Green_Smash_Fists_prompt_3/images/2d_edit.png
+  mask_image: assets/Avengers_Gamma_Green_Smash_Fists_prompt_3/images/2d_mask.png
+  mask_glb: assets/Avengers_Gamma_Green_Smash_Fists_prompt_3/mask.glb
+  source_voxels: assets/Avengers_Gamma_Green_Smash_Fists_prompt_3/voxels.ply
+
+preprocess:
+  crop_policy: union_crop
+  foreground_policy: alpha_or_rembg
+  mask_policy: provided
+
+ss:
+  sampler:
+    steps: 25

@@ -6,6 +6,13 @@ produces a standalone HTML report focused on:
 1. Mask boundary occupancy
 2. In-mask overlap between source and edit
 3. Whether edited voxels stay aligned with the boundary
+
+python visualize_boundary_alignment.py --source /home/wangxinxing/3dlocaledit/TRELLIS_EDIT/assets/edit_example/voxels.ply --edit /home/wangxinxing/3dlocaledit/TRELLIS_EDIT/outputs/p2p_latent_blend_ss/test/edit/ss/coords.ply --mask /home/wangxinxing/3dlocaledit/TRELLIS_EDIT/assets/edit_example/voxels_delete.ply --output-dir /home/wangxinxing/3dlocaledit/TRELLIS_EDIT/outputs/boundary_alignment_vis
+
+python visualize_boundary_alignment.py --source /home/wangxinxing/3dlocaledit/TRELLIS_EDIT/assets/Avengers_Gamma_Green_Smash_Fists_prompt_3/voxels.ply --edit /home/wangxinxing/3dlocaledit/TRELLIS_EDIT/outputs/p2p_latent_blend_ss/Avengers_Gamma_Green_Smash_Fists_prompt_3/edit/ss/coords.ply --mask /home/wangxinxing/3dlocaledit/TRELLIS_EDIT/assets/Avengers_Gamma_Green_Smash_Fists_prompt_3/voxels_delete.ply --output-dir /home/wangxinxing/3dlocaledit/TRELLIS_EDIT/outputs/boundary_alignment_vis/Avengers_Gamma_Green_Smash_Fists_prompt_3
+
+python visualize_boundary_alignment.py --source /home/wangxinxing/3dlocaledit/TRELLIS_EDIT/assets/CHICKEN_RACER_prompt_1/voxels.ply --edit /home/wangxinxing/3dlocaledit/TRELLIS_EDIT/outputs/p2p_latent_blend_ss/CHICKEN_RACER_prompt_1/edit/ss/coords.ply --mask /home/wangxinxing/3dlocaledit/TRELLIS_EDIT/assets/CHICKEN_RACER_prompt_1/voxels_delete.ply --output-dir /home/wangxinxing/3dlocaledit/TRELLIS_EDIT/outputs/boundary_alignment_vis/CHICKEN_RACER_prompt_1
+
 """
 
 from __future__ import annotations
@@ -15,7 +22,7 @@ import json
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
-from typing import Dict, Iterable, Mapping, Sequence, Set, Tuple
+from typing import Dict, Iterable, Mapping, Set, Tuple
 
 import numpy as np
 import plotly.graph_objects as go
@@ -41,6 +48,39 @@ ROLE_DEFAULTS = {
 }
 
 
+UNIT_CUBE_VERTICES = np.asarray(
+    [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [1.0, 0.0, 1.0],
+        [1.0, 1.0, 1.0],
+        [0.0, 1.0, 1.0],
+    ],
+    dtype=np.float32,
+)
+
+UNIT_CUBE_FACES = np.asarray(
+    [
+        [0, 2, 1],
+        [0, 3, 2],
+        [4, 5, 6],
+        [4, 6, 7],
+        [0, 7, 3],
+        [0, 4, 7],
+        [1, 6, 5],
+        [1, 2, 6],
+        [0, 5, 4],
+        [0, 1, 5],
+        [3, 6, 2],
+        [3, 7, 6],
+    ],
+    dtype=np.int32,
+)
+
+
 @dataclass(frozen=True)
 class LayerStyle:
     name: str
@@ -52,69 +92,53 @@ class LayerStyle:
 
 
 LAYER_STYLES: Dict[str, LayerStyle] = {
-    "mask_boundary": LayerStyle(
-        name="Mask Boundary",
+    "boundary": LayerStyle(
+        name="Boundary",
         color="#ff5a5f",
-        size=3.2,
-        opacity=0.22,
+        size=1.0,
+        opacity=1.0,
         visible=True,
-        description="Mask itself, restricted to boundary voxels only.",
+        description="Source voxels outside the mask that are adjacent to source voxels inside the mask.",
     ),
-    "boundary_aligned": LayerStyle(
-        name="Boundary Aligned",
-        color="#00c2a8",
-        size=4.0,
-        opacity=0.95,
+    "boundary_isolated": LayerStyle(
+        name="Boundary Isolated",
+        color="#8b0000",
+        size=1.2,
+        opacity=1.0,
         visible=True,
-        description="Source and edit both occupy the same mask-boundary voxels.",
+        description="Boundary voxels with NO edit voxels nearby (neither occupied nor adjacent).",
     ),
-    "boundary_missing": LayerStyle(
-        name="Boundary Missing",
-        color="#ffb347",
-        size=4.4,
-        opacity=0.95,
+    "interface": LayerStyle(
+        name="Interface",
+        color="#ff9500",
+        size=1.0,
+        opacity=1.0,
         visible=True,
-        description="Source occupied these boundary voxels, but edit did not.",
+        description="Source voxels inside the mask that are adjacent to boundary voxels.",
     ),
-    "boundary_added": LayerStyle(
-        name="Boundary Added",
-        color="#9d6cff",
-        size=4.4,
-        opacity=0.95,
+    "source_only_in_mask": LayerStyle(
+        name="Source Only In Mask",
+        color="#4c78ff",
+        size=1.0,
+        opacity=1.0,
         visible=True,
-        description="Edit occupies these mask-boundary voxels while source did not.",
+        description="Source-only voxels inside the mask.",
     ),
-    "in_mask_overlap": LayerStyle(
-        name="In-Mask Overlap",
-        color="#2f90ff",
-        size=3.4,
-        opacity=0.9,
+    "edit_only_in_mask": LayerStyle(
+        name="Edit Only In Mask",
+        color="#00d27a",
+        size=1.0,
+        opacity=1.0,
         visible=True,
-        description="Source and edit overlap inside the mask.",
+        description="Edit-only voxels inside the mask.",
     ),
-    "in_mask_source_only": LayerStyle(
-        name="In-Mask Source Only",
+    "overlap_in_mask": LayerStyle(
+        name="Overlap In Mask",
         color="#ffd166",
-        size=3.6,
-        opacity=0.78,
-        visible=False,
-        description="Mask voxels kept only by the source, absent from the edit.",
-    ),
-    "in_mask_edit_only": LayerStyle(
-        name="In-Mask Edit Only",
-        color="#06d6a0",
-        size=3.8,
-        opacity=0.84,
+        size=1.0,
+        opacity=1.0,
         visible=True,
-        description="Mask voxels newly introduced by the edit.",
-    ),
-    "edit_leak_near_boundary": LayerStyle(
-        name="Edit Leak Near Boundary",
-        color="#ffffff",
-        size=4.5,
-        opacity=0.96,
-        visible=True,
-        description="Edited voxels outside the mask but directly adjacent to the mask boundary.",
+        description="Source/edit overlapping voxels inside the mask.",
     ),
 }
 
@@ -257,35 +281,70 @@ def compute_regions(
     edit_set = array_to_coord_set(edit_coords)
     mask_set = array_to_coord_set(mask_coords)
 
-    mask_boundary = find_boundary_voxels(mask_set, resolution)
-    outer_shell = find_outer_shell(mask_boundary, mask_set, resolution)
-
     source_in_mask = source_set & mask_set
     edit_in_mask = edit_set & mask_set
     in_mask_overlap = source_in_mask & edit_in_mask
     in_mask_source_only = source_in_mask - edit_in_mask
     in_mask_edit_only = edit_in_mask - source_in_mask
 
-    source_boundary = source_set & mask_boundary
-    edit_boundary = edit_set & mask_boundary
-    boundary_aligned = source_boundary & edit_boundary
-    boundary_missing = source_boundary - edit_boundary
-    boundary_added = edit_boundary - source_boundary
-    edit_leak_near_boundary = (edit_set - mask_set) & outer_shell
+    # Find source voxels outside the mask
+    source_outside_mask = source_set - mask_set
+
+    # Boundary voxels = source voxels OUTSIDE mask that are adjacent to source voxels INSIDE mask
+    boundary_ring: Set[Coord] = set()
+    for x, y, z in source_outside_mask:
+        for dx, dy, dz in NEIGHBOR_OFFSETS:
+            neighbor = (x + dx, y + dy, z + dz)
+            if neighbor in source_in_mask:
+                boundary_ring.add((x, y, z))
+                break
+
+    # Interface voxels = source voxels INSIDE mask that are adjacent to boundary voxels
+    interface_voxels: Set[Coord] = set()
+    for x, y, z in boundary_ring:
+        for dx, dy, dz in NEIGHBOR_OFFSETS:
+            neighbor = (x + dx, y + dy, z + dz)
+            if neighbor in source_in_mask:
+                interface_voxels.add(neighbor)
+
+    # Boundary alignment metrics
+    source_touch_boundary = interface_voxels
+    edit_touch_boundary = edit_in_mask & interface_voxels
+    boundary_aligned = source_touch_boundary & edit_touch_boundary
+    boundary_missing = source_touch_boundary - edit_touch_boundary
+    boundary_added = edit_touch_boundary - source_touch_boundary
+
+    # Edit leaks: edit voxels outside mask
+    edit_outside_mask = edit_set - mask_set
+    edit_leak_near_boundary = edit_outside_mask & boundary_ring
+
+    # Find boundary voxels that have NO edit voxels nearby (neither occupied nor adjacent)
+    boundary_isolated_from_edit: Set[Coord] = set()
+    for x, y, z in boundary_ring:
+        # Check if this boundary voxel itself is occupied by edit
+        if (x, y, z) in edit_set:
+            continue
+        # Check if any neighbor is occupied by edit
+        has_edit_neighbor = False
+        for dx, dy, dz in NEIGHBOR_OFFSETS:
+            neighbor = (x + dx, y + dy, z + dz)
+            if neighbor in edit_set:
+                has_edit_neighbor = True
+                break
+        if not has_edit_neighbor:
+            boundary_isolated_from_edit.add((x, y, z))
 
     regions = {
-        "mask_boundary": coord_set_to_array(mask_boundary),
-        "boundary_aligned": coord_set_to_array(boundary_aligned),
-        "boundary_missing": coord_set_to_array(boundary_missing),
-        "boundary_added": coord_set_to_array(boundary_added),
-        "in_mask_overlap": coord_set_to_array(in_mask_overlap),
-        "in_mask_source_only": coord_set_to_array(in_mask_source_only),
-        "in_mask_edit_only": coord_set_to_array(in_mask_edit_only),
-        "edit_leak_near_boundary": coord_set_to_array(edit_leak_near_boundary),
+        "boundary": coord_set_to_array(boundary_ring),
+        "interface": coord_set_to_array(interface_voxels),
+        "source_only_in_mask": coord_set_to_array(in_mask_source_only),
+        "edit_only_in_mask": coord_set_to_array(in_mask_edit_only),
+        "overlap_in_mask": coord_set_to_array(in_mask_overlap),
+        "boundary_isolated": coord_set_to_array(boundary_isolated_from_edit),
     }
 
     in_mask_union = source_in_mask | edit_in_mask
-    boundary_union = source_boundary | edit_boundary
+    boundary_union = source_touch_boundary | edit_touch_boundary
 
     stats = {
         "resolution": resolution,
@@ -305,15 +364,17 @@ def compute_regions(
             "iou": safe_ratio(len(in_mask_overlap), len(in_mask_union)),
         },
         "boundary_alignment": {
-            "mask_boundary_voxels": len(mask_boundary),
-            "source_on_mask_boundary": len(source_boundary),
-            "edit_on_mask_boundary": len(edit_boundary),
+            "boundary_voxels": len(boundary_ring),
+            "interface_voxels": len(interface_voxels),
+            "source_touch_boundary": len(source_touch_boundary),
+            "edit_touch_boundary": len(edit_touch_boundary),
             "aligned": len(boundary_aligned),
             "missing": len(boundary_missing),
             "added": len(boundary_added),
             "edit_leak_near_boundary": len(edit_leak_near_boundary),
-            "source_boundary_preservation_ratio": safe_ratio(len(boundary_aligned), len(source_boundary)),
-            "mask_boundary_coverage_by_edit_ratio": safe_ratio(len(edit_boundary), len(mask_boundary)),
+            "boundary_isolated_from_edit": len(boundary_isolated_from_edit),
+            "source_boundary_preservation_ratio": safe_ratio(len(boundary_aligned), len(source_touch_boundary)),
+            "boundary_coverage_by_edit_ratio": safe_ratio(len(edit_touch_boundary), len(interface_voxels)),
             "boundary_iou": safe_ratio(len(boundary_aligned), len(boundary_union)),
         },
     }
@@ -321,36 +382,98 @@ def compute_regions(
     return regions, stats
 
 
-def make_trace(layer_key: str, coords: np.ndarray) -> go.Scatter3d | None:
+def build_voxel_mesh(coords: np.ndarray, cube_size: float) -> tuple[np.ndarray, np.ndarray]:
+    if len(coords) == 0:
+        return np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.int32)
+
+    inset = (1.0 - cube_size) * 0.5
+    vertices = np.empty((len(coords) * 8, 3), dtype=np.float32)
+    faces = np.empty((len(coords) * 12, 3), dtype=np.int32)
+
+    for idx, coord in enumerate(coords.astype(np.float32, copy=False)):
+        base_vertex = idx * 8
+        base_face = idx * 12
+        offset = coord + inset
+        vertices[base_vertex:base_vertex + 8] = UNIT_CUBE_VERTICES * cube_size + offset
+        faces[base_face:base_face + 12] = UNIT_CUBE_FACES + base_vertex
+
+    return vertices, faces
+
+
+def build_voxel_edge_trace(coords: np.ndarray, cube_size: float, visible: bool) -> go.Scatter3d | None:
     if len(coords) == 0:
         return None
 
-    style = LAYER_STYLES[layer_key]
+    inset = (1.0 - cube_size) * 0.5
+    edge_pairs = (
+        (0, 1), (1, 2), (2, 3), (3, 0),
+        (4, 5), (5, 6), (6, 7), (7, 4),
+        (0, 4), (1, 5), (2, 6), (3, 7),
+    )
+
+    xs = []
+    ys = []
+    zs = []
+    for coord in coords.astype(np.float32, copy=False):
+        cube_vertices = UNIT_CUBE_VERTICES * cube_size + coord + inset
+        for start_idx, end_idx in edge_pairs:
+            start_vertex = cube_vertices[start_idx]
+            end_vertex = cube_vertices[end_idx]
+            xs.extend((float(start_vertex[0]), float(end_vertex[0]), None))
+            ys.extend((float(start_vertex[1]), float(end_vertex[1]), None))
+            zs.extend((float(start_vertex[2]), float(end_vertex[2]), None))
+
     return go.Scatter3d(
-        x=coords[:, 0],
-        y=coords[:, 1],
-        z=coords[:, 2],
-        mode="markers",
+        x=xs,
+        y=ys,
+        z=zs,
+        mode="lines",
+        visible=True if visible else "legendonly",
+        showlegend=False,
+        line=dict(color="#f8f4ea", width=2),
+        hoverinfo="skip",
+    )
+
+
+def make_traces(layer_key: str, coords: np.ndarray) -> list[go.BaseTraceType]:
+    if len(coords) == 0:
+        return []
+
+    style = LAYER_STYLES[layer_key]
+    vertices, faces = build_voxel_mesh(coords, style.size)
+    mesh_trace = go.Mesh3d(
+        x=vertices[:, 0],
+        y=vertices[:, 1],
+        z=vertices[:, 2],
+        i=faces[:, 0],
+        j=faces[:, 1],
+        k=faces[:, 2],
         name=f"{style.name} ({len(coords)})",
         visible=True if style.visible else "legendonly",
-        marker=dict(
-            size=style.size,
-            color=style.color,
-            opacity=style.opacity,
+        color=style.color,
+        opacity=style.opacity,
+        flatshading=True,
+        lighting=dict(
+            ambient=0.52,
+            diffuse=0.48,
+            fresnel=0.0,
+            roughness=1.0,
+            specular=0.0,
         ),
-        hovertemplate=(
-            f"{style.name}<br>"
-            "x=%{x:.0f}, y=%{y:.0f}, z=%{z:.0f}"
-            "<extra></extra>"
-        ),
+        lightposition=dict(x=140, y=120, z=220),
+        hoverinfo="skip",
     )
+    edge_trace = build_voxel_edge_trace(coords, style.size, style.visible)
+    traces = [mesh_trace]
+    if edge_trace is not None:
+        traces.append(edge_trace)
+    return traces
 
 
 def build_figure(regions: Mapping[str, np.ndarray], stats: Mapping[str, object], title: str) -> go.Figure:
     fig = go.Figure()
     for layer_key in LAYER_STYLES:
-        trace = make_trace(layer_key, regions[layer_key])
-        if trace is not None:
+        for trace in make_traces(layer_key, regions[layer_key]):
             fig.add_trace(trace)
 
     boundary_stats = stats["boundary_alignment"]  # type: ignore[index]
@@ -359,23 +482,18 @@ def build_figure(regions: Mapping[str, np.ndarray], stats: Mapping[str, object],
     fig.update_layout(
         title=(
             f"{title}<br>"
-            f"<sup>Boundary IoU {boundary_stats['boundary_iou']:.1%} · "
-            f"Mask Overlap IoU {overlap_stats['iou']:.1%}</sup>"
+            f"<span style=\"font-size:13px;font-weight:400;opacity:0.88\">"
+            f"Boundary IoU {boundary_stats['boundary_iou']:.1%} · "
+            f"Mask Overlap IoU {overlap_stats['iou']:.1%}"
+            f"</span>"
         ),
         template="plotly_dark",
         paper_bgcolor="#10141a",
         plot_bgcolor="#10141a",
         width=1280,
         height=920,
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="left",
-            x=0.0,
-            bgcolor="rgba(0,0,0,0)",
-        ),
-        margin=dict(l=0, r=0, t=88, b=0),
+        showlegend=False,
+        margin=dict(l=4, r=4, t=100, b=108),
         scene=dict(
             bgcolor="#10141a",
             aspectmode="data",
@@ -393,17 +511,16 @@ def pct(value: float) -> str:
 
 
 def build_summary_cards(stats: Mapping[str, object]) -> str:
-    totals = stats["totals"]  # type: ignore[index]
     overlap = stats["mask_overlap"]  # type: ignore[index]
     boundary = stats["boundary_alignment"]  # type: ignore[index]
 
     cards = [
-        ("Source Voxels", f"{totals['source']:,}", "Original occupancy input"),
-        ("Edit Voxels", f"{totals['edit']:,}", "Edited occupancy input"),
-        ("Mask Voxels", f"{totals['mask']:,}", "Mask occupancy input"),
-        ("Mask Overlap IoU", pct(overlap["iou"]), "Source/edit overlap inside mask"),
-        ("Boundary IoU", pct(boundary["boundary_iou"]), "Agreement on mask boundary occupancy"),
-        ("Boundary Leaks", f"{boundary['edit_leak_near_boundary']:,}", "Edited voxels spilling outside mask near boundary"),
+        ("Boundary Voxels", f"{boundary['boundary_voxels']:,}", "Source voxels outside mask adjacent to source voxels inside mask"),
+        ("Boundary Isolated", f"{boundary['boundary_isolated_from_edit']:,}", "Boundary voxels with NO edit voxels nearby"),
+        ("Overlap In Mask", f"{overlap['overlap']:,}", "Source/edit overlapping voxels inside the mask"),
+        ("Source Only In Mask", f"{overlap['source_only']:,}", "Source-only voxels inside the mask"),
+        ("Edit Only In Mask", f"{overlap['edit_only']:,}", "Edit-only voxels inside the mask"),
+        ("Boundary IoU", pct(boundary["boundary_iou"]), "Agreement on interior voxels that touch the outer boundary ring"),
     ]
 
     return "\n".join(
@@ -423,21 +540,24 @@ def build_metric_table(stats: Mapping[str, object]) -> str:
     boundary = stats["boundary_alignment"]  # type: ignore[index]
 
     rows = [
+        ("Total source voxels", f"{stats['totals']['source']:,}"),  # type: ignore[index]
+        ("Total edit voxels", f"{stats['totals']['edit']:,}"),  # type: ignore[index]
         ("Source in mask", f"{overlap['source_in_mask']:,}"),
         ("Edit in mask", f"{overlap['edit_in_mask']:,}"),
         ("In-mask overlap", f"{overlap['overlap']:,}"),
-        ("In-mask source only", f"{overlap['source_only']:,}"),
-        ("In-mask edit only", f"{overlap['edit_only']:,}"),
+        ("Source only in mask", f"{overlap['source_only']:,}"),
+        ("Edit only in mask", f"{overlap['edit_only']:,}"),
         ("Overlap / source-in-mask", pct(overlap["overlap_vs_source_ratio"])),
         ("Overlap / edit-in-mask", pct(overlap["overlap_vs_edit_ratio"])),
-        ("Mask boundary voxels", f"{boundary['mask_boundary_voxels']:,}"),
-        ("Source on mask boundary", f"{boundary['source_on_mask_boundary']:,}"),
-        ("Edit on mask boundary", f"{boundary['edit_on_mask_boundary']:,}"),
+        ("Boundary voxels", f"{boundary['boundary_voxels']:,}"),
+        ("Boundary isolated from edit", f"{boundary['boundary_isolated_from_edit']:,}"),
+        ("Boundary interface voxels", f"{boundary['interface_voxels']:,}"),
+        ("Source touching boundary", f"{boundary['source_touch_boundary']:,}"),
+        ("Edit touching boundary", f"{boundary['edit_touch_boundary']:,}"),
         ("Boundary aligned", f"{boundary['aligned']:,}"),
         ("Boundary missing", f"{boundary['missing']:,}"),
         ("Boundary added", f"{boundary['added']:,}"),
-        ("Source boundary preservation", pct(boundary["source_boundary_preservation_ratio"])),
-        ("Mask boundary coverage by edit", pct(boundary["mask_boundary_coverage_by_edit_ratio"])),
+        ("Boundary leaks", f"{boundary['edit_leak_near_boundary']:,}"),
     ]
 
     return "\n".join(
@@ -460,6 +580,21 @@ def build_legend(regions: Mapping[str, np.ndarray]) -> str:
     return "\n".join(blocks)
 
 
+def build_toggle_controls(regions: Mapping[str, np.ndarray]) -> str:
+    controls = []
+    for layer_key, style in LAYER_STYLES.items():
+        checked = " checked" if style.visible else ""
+        controls.append(
+            '<label class="toggle-row">'
+            f'<input type="checkbox" data-layer="{escape(layer_key)}"{checked}>'
+            f'<span class="toggle-swatch" style="background:{style.color};"></span>'
+            f'<span class="toggle-label">{escape(style.name)}</span>'
+            f'<span class="toggle-count">{len(regions[layer_key]):,}</span>'
+            "</label>"
+        )
+    return "\n".join(controls)
+
+
 def build_html_report(
     fig: go.Figure,
     stats: Mapping[str, object],
@@ -479,6 +614,13 @@ def build_html_report(
     )
 
     stats_json = escape(json.dumps(stats, indent=2))
+    trace_indices = {}
+    current_idx = 0
+    for layer_key in LAYER_STYLES:
+        if len(regions[layer_key]) > 0:
+            trace_indices[layer_key] = [current_idx, current_idx + 1]
+            current_idx += 2
+    trace_indices_json = json.dumps(trace_indices)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -636,6 +778,39 @@ def build_html_report(
       align-items: start;
       padding: 9px 0;
     }}
+    .toggle-panel {{
+      display: grid;
+      gap: 10px;
+    }}
+    .toggle-row {{
+      display: grid;
+      grid-template-columns: 18px 14px 1fr auto;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      background: rgba(255, 255, 255, 0.56);
+      border-radius: 14px;
+      border: 1px solid rgba(24, 23, 22, 0.08);
+      cursor: pointer;
+    }}
+    .toggle-row input {{
+      margin: 0;
+    }}
+    .toggle-swatch {{
+      width: 14px;
+      height: 14px;
+      border-radius: 4px;
+      box-shadow: 0 0 0 1px rgba(24, 23, 22, 0.16);
+    }}
+    .toggle-label {{
+      font-size: 13px;
+      font-weight: 600;
+    }}
+    .toggle-count {{
+      font-size: 12px;
+      color: #6d675f;
+      font-variant-numeric: tabular-nums;
+    }}
     .swatch {{
       width: 14px;
       height: 14px;
@@ -708,9 +883,17 @@ def build_html_report(
       <p class="eyebrow">Voxel Boundary Report</p>
       <h1>Boundary-first inspection for source, edit, and mask voxels</h1>
       <p class="lead">
-        The report suppresses unrelated outer geometry and keeps the view centered on:
-        mask boundary occupancy, in-mask overlap, and edited voxels that fail to stay aligned to the boundary.
+        The report focuses on boundary alignment between source and edit voxels.
+        Boundary voxels (red) are source voxels outside the mask that are adjacent to source voxels inside the mask.
+        The visualization shows how well edit voxels preserve the boundary interface.
       </p>
+
+      <section class="section" style="margin-top: 16px; padding-top: 0; border-top: none;">
+        <h2>Switches</h2>
+        <div class="toggle-panel">
+          {build_toggle_controls(regions)}
+        </div>
+      </section>
 
       <div class="cards">
         {build_summary_cards(stats)}
@@ -747,6 +930,19 @@ def build_html_report(
       </div>
     </main>
   </div>
+  <script>
+    const TRACE_INDEX = JSON.parse('{trace_indices_json}');
+    const plotDiv = document.querySelector('.plot-panel .js-plotly-plot');
+    for (const input of document.querySelectorAll('.toggle-row input[type="checkbox"]')) {{
+      input.addEventListener('change', () => {{
+        const layer = input.dataset.layer;
+        const traceIndices = TRACE_INDEX[layer] || [];
+        if (plotDiv && traceIndices.length > 0) {{
+          Plotly.restyle(plotDiv, {{ visible: input.checked }}, traceIndices);
+        }}
+      }});
+    }}
+  </script>
 </body>
 </html>
 """

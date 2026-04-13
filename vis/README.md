@@ -16,7 +16,8 @@ This directory contains scripts for visualizing TRELLIS intermediate results and
 
 - **`visualize_boundary_alignment.py`** - Boundary-focused voxel comparison for `source / edit / mask`
   - Only keeps the visualization centered on the mask boundary and mask-internal overlap
-  - Highlights `boundary_aligned`, `boundary_missing`, `boundary_added`, and `edit_leak_near_boundary`
+  - Renders voxels as nested small cubes instead of point clouds, so `mask/source/edit` boundary layers can overlap visibly
+  - Reports `boundary_aligned`, `boundary_missing`, `boundary_added`, and `edit_leak_near_boundary` in the stats summary
   - Writes a standalone HTML report plus a JSON stats summary
 
 ## Usage
@@ -34,7 +35,7 @@ python vis/visualize_variant_intermediates.py
 python vis/visualize_boundary_alignment.py \
   --mask assets/edit_example/voxels_delete.ply \
   --source assets/edit_example/voxels.ply \
-  --edit outputs/image_p2p_latent_blend_ss/test/edit/coords.ply \
+  --edit outputs/p2p_latent_blend_ss/test/edit/ss/coords.ply \
   --output-dir outputs/boundary_alignment_vis
 ```
 

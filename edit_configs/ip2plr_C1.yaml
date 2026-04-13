@@ -1,13 +1,13 @@
 # ============================================================
-# 完整批量评测示例：P2P + latent blend 全流程
-#
-# 用法:
-#   python run_batch_edit_and_eval.py --config edit_configs/batch/full_benchmark.yaml
+# CHICKEN_RACER_prompt_1 的 composable 配置
+# 特点：
+# - SS / SLAT 两阶段都开启 P2P hook
 # ============================================================
 
 entrypoint: p2p_latent_blend_full
 
 runtime:
+  case_name: C1_ss_slat_p2p
   model: microsoft/TRELLIS-image-large
   seed: 1
   device: cuda:0
@@ -15,6 +15,14 @@ runtime:
   skip_render: true
   skip_glb: false
   skip_ply: false
+
+inputs:
+  source_image: assets/CHICKEN_RACER_prompt_1/images/2d_render.png
+  edit_image: assets/CHICKEN_RACER_prompt_1/images/2d_edit.png
+  mask_image: assets/CHICKEN_RACER_prompt_1/images/2d_mask.png
+  mask_glb: assets/CHICKEN_RACER_prompt_1/mask.glb
+  source_voxels: assets/CHICKEN_RACER_prompt_1/voxels.ply
+  source_features: assets/CHICKEN_RACER_prompt_1/features.npz
 
 preprocess:
   crop_policy: union_crop
@@ -29,11 +37,11 @@ ss:
   blend_strength: 1.0
   hook:
     t_start: 1.0
-    t_end: 0.3
-    strength: 1.0
-  denoise_cfg_strength: 5.0
+    t_end: 0.5
+    strength: 0.5
+  denoise_cfg_strength: 6.0
   denoise_cfg_interval: [0.5, 1.0]
-  inversion_cfg_strength: 6.0
+  inversion_cfg_strength: 5.0
   inversion_cfg_interval: [0.5, 1.0]
   output_format: both
   save_voxel_mesh: true
@@ -45,25 +53,6 @@ slat:
   blend_enabled: true
   hook:
     t_start: 0.8
-    t_end: 0.0
-    strength: 1.0
+    t_end: 0.5
+    strength: 0.5
   skip_source_decode: true
-
-batch:
-  config_name: full_benchmark
-  gt_root: /home/wangxinxing/code/Edit3Dpp/data
-  assets_root: /cache/wangxinxing/data/temp/renders
-  pred_root: /cache/wangxinxing/data/temp/p2p_latent_blend_full_benchmark
-  # dataset: GSO
-  # max_cases: 50
-  metrics:
-    - psnr
-    - ssim
-    - lpips
-    - fid
-    - dino_if
-    - chamfer
-    - clip_t
-  skip_benchmark_render: false
-  skip_exists: false
-  keep_case_outputs: false

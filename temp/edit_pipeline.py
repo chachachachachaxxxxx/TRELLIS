@@ -786,7 +786,7 @@ def sample_slat_inverse(pipeline, cond_src, slat_src, coords_mask, cfg_strength_
     and run the same Taylor-improved inversion scheme"
     """
     if coords_mask.shape[0] == 0:
-        print("[WARN] coords_preserve is empty; skipping SLAT inverse preservation and continuing with full-region editing.")
+        print("[WARN] coords_preserve is empty; skipping SLAT inverse preservation and continuing with full-region trellis_edit.")
         return {}, {}
 
     stage = 2

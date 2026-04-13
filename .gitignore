@@ -402,3 +402,5 @@ assets
 .graphify*
 .markdownlint.json
 wiki/
+exp/
+vis/trellis_text_xlarge_trace
