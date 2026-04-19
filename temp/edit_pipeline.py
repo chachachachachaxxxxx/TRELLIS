@@ -616,8 +616,8 @@ class InversionFlowEulerGuidanceIntervalSampler(FlowEulerGuidanceIntervalSampler
     def sample_once(self, model, sample, t_curr, t_prev, cond, cfg_strength, kv, self_kv_mask, cross_kv_mask, t_latent, is_text):
         """单步采样 —— 二阶Taylor改进的Euler方案（RF-Solver）。
         
-        对应论文公式(1)(2)，设 h = t_prev - t_curr:
-          x_{t+h} = x_t + h·f_θ(x_t, t) - ½·h²·∂_t f_θ(x_t, t)
+        对应当前代码里的二阶Taylor更新，设 h = t_prev - t_curr:
+          x_{t+h} = x_t + h·f_θ(x_t, t) + ½·h²·∂_t f_θ(x_t, t)
         其中 ∂_t f_θ 通过中间点有限差分近似:
           ∂_t f_θ ≈ [f_θ(x_{t+h/2}, t+h/2) - f_θ(x_t, t)] / (h/2)
         
@@ -635,8 +635,10 @@ class InversionFlowEulerGuidanceIntervalSampler(FlowEulerGuidanceIntervalSampler
         pred_mid = self.inference_model(model, sample_mid, t_mid, cond, cfg_strength, kv, self_kv_mask, cross_kv_mask, t_latent, order, is_text)
         # 有限差分估计时间导数
         first_order = (pred_mid - pred) / ((t_prev - t_curr) / 2)
-        # Taylor展开更新: x_{t-Δ} = x_t + Δ·f_θ + ½·Δ²·∂_t f_θ
-        sample = sample + (t_prev - t_curr) * pred - 0.5 * (t_prev - t_curr) ** 2 * first_order
+        # 这里使用的定义是:
+        # first_order = (pred_mid - pred) / ((t_prev - t_curr) / 2)
+        # 因此 Taylor 二阶修正项应当配加号。
+        sample = sample + (t_prev - t_curr) * pred + 0.5 * (t_prev - t_curr) ** 2 * first_order
         return sample
 
     @torch.no_grad()
