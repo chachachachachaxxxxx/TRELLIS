@@ -296,13 +296,231 @@ class TrellisImageTo3DPipeline(Pipeline):
         slat = self.sample_slat(cond, coords, slat_sampler_params)
         return self.decode_slat(slat, formats)
 
+    def _normalize_view_z_rotations(
+        self,
+        view_azimuths: Sequence[float],
+        reference_azimuth: float = 0.0,
+    ) -> List[int]:
+        """Map view azimuths to quarter turns around the latent z axis.
+
+        ``reference_azimuth`` defines the canonical front anchor. For the
+        benchmark data, the front input view is at -90 degrees, so callers
+        should pass that explicit anchor instead of assuming 0 degrees.
+        """
+        quarter_turns: List[int] = []
+        for azimuth in view_azimuths:
+            relative_azimuth = float(azimuth) - float(reference_azimuth)
+            quarter_steps = int(round(relative_azimuth / 90.0))
+            if not np.isclose(relative_azimuth, quarter_steps * 90.0):
+                raise ValueError(
+                    "view_aligned_stochastic only supports 90-degree azimuths, "
+                    f"got relative azimuth {relative_azimuth}"
+                )
+            quarter_turns.append(quarter_steps % 4)
+        return quarter_turns
+
+    def _rotate_dense_sample_z(
+        self,
+        sample: torch.Tensor,
+        quarter_turns: int,
+    ) -> torch.Tensor:
+        k = int(quarter_turns) % 4
+        if k == 0:
+            return sample
+        return torch.rot90(sample, k=k, dims=(2, 3)).contiguous()
+
+    def _rotate_sparse_coords_z(
+        self,
+        coords: torch.Tensor,
+        spatial_resolution: int,
+        quarter_turns: int,
+    ) -> torch.Tensor:
+        k = int(quarter_turns) % 4
+        if k == 0:
+            return coords
+
+        rotated = coords.clone()
+        x = rotated[:, 1].long()
+        y = rotated[:, 2].long()
+        limit = int(spatial_resolution) - 1
+        for _ in range(k):
+            x, y = limit - y, x
+        rotated[:, 1] = x.to(rotated.dtype)
+        rotated[:, 2] = y.to(rotated.dtype)
+        return rotated.contiguous()
+
+    def _rotate_sparse_sample_z(
+        self,
+        sample: sp.SparseTensor,
+        spatial_resolution: int,
+        quarter_turns: int,
+    ) -> sp.SparseTensor:
+        k = int(quarter_turns) % 4
+        if k == 0:
+            return sample
+        rotated_coords = self._rotate_sparse_coords_z(
+            sample.coords,
+            spatial_resolution=spatial_resolution,
+            quarter_turns=k,
+        )
+        return sample.replace(sample.feats, rotated_coords)
+
+    def _rotate_sample_z(
+        self,
+        sample: Union[torch.Tensor, sp.SparseTensor],
+        model: nn.Module,
+        quarter_turns: int,
+    ) -> Union[torch.Tensor, sp.SparseTensor]:
+        k = int(quarter_turns) % 4
+        if k == 0:
+            return sample
+        if isinstance(sample, torch.Tensor):
+            return self._rotate_dense_sample_z(sample, k)
+        if isinstance(sample, sp.SparseTensor):
+            spatial_resolution = int(getattr(model, "resolution", 0))
+            if spatial_resolution <= 0:
+                if sample.coords.numel() == 0:
+                    raise ValueError("Cannot infer sparse rotation resolution from empty coords.")
+                spatial_resolution = int(sample.coords[:, 1:].max().item()) + 1
+            return self._rotate_sparse_sample_z(sample, spatial_resolution, k)
+        raise TypeError(f"Unsupported sample type for view rotation: {type(sample)}")
+
+    def _relative_view_azimuths(
+        self,
+        view_azimuths: Sequence[float],
+        reference_azimuth: float = 0.0,
+    ) -> List[float]:
+        relative_azimuths: List[float] = []
+        for azimuth in view_azimuths:
+            relative = (float(azimuth) - float(reference_azimuth) + 180.0) % 360.0 - 180.0
+            relative_azimuths.append(relative)
+        return relative_azimuths
+
+    def _build_dense_canonical_view_mask(
+        self,
+        sample: torch.Tensor,
+        direction_x: float,
+        direction_y: float,
+        floor: float,
+        sharpness: float,
+    ) -> torch.Tensor:
+        if sample.ndim != 5:
+            raise ValueError(f"Expected dense sample with 5 dims, got {sample.shape}")
+
+        resolution_x = int(sample.shape[2])
+        resolution_y = int(sample.shape[3])
+        mask_dtype = torch.float32
+        x_coords = torch.linspace(
+            -1.0 + 1.0 / resolution_x,
+            1.0 - 1.0 / resolution_x,
+            resolution_x,
+            device=sample.device,
+            dtype=mask_dtype,
+        )
+        y_coords = torch.linspace(
+            -1.0 + 1.0 / resolution_y,
+            1.0 - 1.0 / resolution_y,
+            resolution_y,
+            device=sample.device,
+            dtype=mask_dtype,
+        )
+        grid_x, grid_y = torch.meshgrid(x_coords, y_coords, indexing='ij')
+        score = grid_x * float(direction_x) + grid_y * float(direction_y)
+        mask_xy = float(floor) + (1.0 - float(floor)) * torch.sigmoid(float(sharpness) * score)
+        return mask_xy.to(device=sample.device, dtype=sample.dtype).view(1, 1, resolution_x, resolution_y, 1)
+
+    def _build_sparse_canonical_view_weights(
+        self,
+        sample: sp.SparseTensor,
+        spatial_resolution: int,
+        direction_x: float,
+        direction_y: float,
+        floor: float,
+        sharpness: float,
+    ) -> torch.Tensor:
+        coords = sample.coords
+        coord_dtype = torch.float32
+        resolution = float(spatial_resolution)
+        centered_x = ((coords[:, 1].to(dtype=coord_dtype) + 0.5) / resolution) * 2.0 - 1.0
+        centered_y = ((coords[:, 2].to(dtype=coord_dtype) + 0.5) / resolution) * 2.0 - 1.0
+        score = centered_x * float(direction_x) + centered_y * float(direction_y)
+        weights = float(floor) + (1.0 - float(floor)) * torch.sigmoid(float(sharpness) * score)
+        return weights.to(device=sample.device, dtype=sample.feats.dtype)
+
+    def _apply_canonical_view_weighting(
+        self,
+        pred: Union[torch.Tensor, sp.SparseTensor],
+        model: nn.Module,
+        sampler_name: str,
+        relative_azimuth: float,
+        view_weighting: Dict[str, float],
+    ) -> Union[torch.Tensor, sp.SparseTensor]:
+        floor = float(view_weighting['floor'])
+        if sampler_name == 'sparse_structure_sampler':
+            nonreference_scale = float(view_weighting['ss_nonreference_scale'])
+            sharpness = float(view_weighting['ss_sharpness'])
+        elif sampler_name == 'slat_sampler':
+            nonreference_scale = float(view_weighting['slat_nonreference_scale'])
+            sharpness = float(view_weighting['slat_sharpness'])
+        else:
+            raise ValueError(f"Unsupported sampler for canonical view weighting: {sampler_name}")
+
+        redistribution_strength = (
+            1.0
+            if np.isclose(relative_azimuth % 360.0, 0.0)
+            else float(np.clip(nonreference_scale, 0.0, 1.0))
+        )
+        theta = np.deg2rad(relative_azimuth)
+        # Benchmark cardinal labels use front=-90, right=0, back=90, left=180.
+        # With front as the canonical anchor, the visible half-space therefore
+        # lies on -y for theta=0 and rotates around z from there.
+        direction_x = float(np.sin(theta))
+        direction_y = float(-np.cos(theta))
+
+        if isinstance(pred, torch.Tensor):
+            mask = self._build_dense_canonical_view_mask(
+                pred,
+                direction_x=direction_x,
+                direction_y=direction_y,
+                floor=floor,
+                sharpness=sharpness,
+            )
+            normalized_mask = mask / mask.mean().clamp_min(1e-6)
+            redistribution_weights = 1.0 + redistribution_strength * (normalized_mask - 1.0)
+            return pred * redistribution_weights.to(dtype=pred.dtype)
+
+        if isinstance(pred, sp.SparseTensor):
+            spatial_resolution = int(getattr(model, "resolution", 0))
+            if spatial_resolution <= 0:
+                if pred.coords.numel() == 0:
+                    raise ValueError("Cannot infer sparse weighting resolution from empty coords.")
+                spatial_resolution = int(pred.coords[:, 1:].max().item()) + 1
+            weights = self._build_sparse_canonical_view_weights(
+                pred,
+                spatial_resolution=spatial_resolution,
+                direction_x=direction_x,
+                direction_y=direction_y,
+                floor=floor,
+                sharpness=sharpness,
+            )
+            normalized_weights = weights / weights.mean().clamp_min(1e-6)
+            redistribution_weights = 1.0 + redistribution_strength * (normalized_weights - 1.0)
+            while redistribution_weights.ndim < pred.feats.ndim:
+                redistribution_weights = redistribution_weights.unsqueeze(-1)
+            return pred.replace(pred.feats * redistribution_weights)
+
+        raise TypeError(f"Unsupported prediction type for canonical view weighting: {type(pred)}")
+
     @contextmanager
     def inject_sampler_multi_image(
         self,
         sampler_name: str,
         num_images: int,
         num_steps: int,
-        mode: Literal['stochastic', 'multidiffusion'] = 'stochastic',
+        mode: Literal['stochastic', 'multidiffusion', 'view_aligned_stochastic', 'canonical_weighted_stochastic'] = 'stochastic',
+        view_azimuths: Optional[Sequence[float]] = None,
+        view_reference_azimuth: float = 0.0,
+        canonical_view_weighting: Optional[Dict[str, float]] = None,
     ):
         """
         Inject a sampler with multiple images as condition.
@@ -314,17 +532,69 @@ class TrellisImageTo3DPipeline(Pipeline):
         """
         sampler = getattr(self, sampler_name)
         setattr(sampler, f'_old_inference_model', sampler._inference_model)
+        pipeline = self
 
-        if mode == 'stochastic':
+        if mode in ('stochastic', 'view_aligned_stochastic', 'canonical_weighted_stochastic'):
+            if num_steps is None:
+                raise ValueError(f"{mode} requires an explicit sampler step count.")
             if num_images > num_steps:
                 print(f"\033[93mWarning: number of conditioning images is greater than number of steps for {sampler_name}. "
                     "This may lead to performance degradation.\033[0m")
 
             cond_indices = (np.arange(num_steps) % num_images).tolist()
+            quarter_turns = None
+            relative_azimuths = None
+            if mode == 'view_aligned_stochastic':
+                if view_azimuths is None:
+                    raise ValueError("view_aligned_stochastic requires view_azimuths.")
+                if len(view_azimuths) != num_images:
+                    raise ValueError(
+                        "view_azimuths length must match num_images, got "
+                        f"{len(view_azimuths)} vs {num_images}"
+                    )
+                quarter_turns = pipeline._normalize_view_z_rotations(
+                    view_azimuths,
+                    reference_azimuth=view_reference_azimuth,
+                )
+            elif mode == 'canonical_weighted_stochastic':
+                if view_azimuths is None:
+                    raise ValueError("canonical_weighted_stochastic requires view_azimuths.")
+                if canonical_view_weighting is None:
+                    raise ValueError(
+                        "canonical_weighted_stochastic requires canonical_view_weighting."
+                    )
+                if len(view_azimuths) != num_images:
+                    raise ValueError(
+                        "view_azimuths length must match num_images, got "
+                        f"{len(view_azimuths)} vs {num_images}"
+                    )
+                relative_azimuths = pipeline._relative_view_azimuths(
+                    view_azimuths,
+                    reference_azimuth=view_reference_azimuth,
+                )
+
             def _new_inference_model(self, model, x_t, t, cond, **kwargs):
                 cond_idx = cond_indices.pop(0)
                 cond_i = cond[cond_idx:cond_idx+1]
-                return self._old_inference_model(model, x_t, t, cond=cond_i, **kwargs)
+                if mode == 'stochastic':
+                    return self._old_inference_model(model, x_t, t, cond=cond_i, **kwargs)
+                if mode == 'canonical_weighted_stochastic':
+                    assert relative_azimuths is not None
+                    assert canonical_view_weighting is not None
+                    pred = self._old_inference_model(model, x_t, t, cond=cond_i, **kwargs)
+                    return pipeline._apply_canonical_view_weighting(
+                        pred,
+                        model=model,
+                        sampler_name=sampler_name,
+                        relative_azimuth=relative_azimuths[cond_idx],
+                        view_weighting=canonical_view_weighting,
+                    )
+
+                assert quarter_turns is not None
+                sample_rotation = quarter_turns[cond_idx]
+                rotated_x_t = pipeline._rotate_sample_z(x_t, model, sample_rotation)
+                rotated_pred = self._old_inference_model(model, rotated_x_t, t, cond=cond_i, **kwargs)
+                return pipeline._rotate_sample_z(rotated_pred, model, (-sample_rotation) % 4)
         
         elif mode =='multidiffusion':
             from .samplers import FlowEulerSampler
@@ -363,7 +633,10 @@ class TrellisImageTo3DPipeline(Pipeline):
         slat_sampler_params: dict = {},
         formats: List[str] = ['mesh', 'gaussian', 'radiance_field'],
         preprocess_image: bool = True,
-        mode: Literal['stochastic', 'multidiffusion'] = 'stochastic',
+        mode: Literal['stochastic', 'multidiffusion', 'view_aligned_stochastic', 'canonical_weighted_stochastic'] = 'stochastic',
+        view_azimuths: Optional[Sequence[float]] = None,
+        view_reference_azimuth: float = 0.0,
+        canonical_view_weighting: Optional[Dict[str, float]] = None,
     ) -> dict:
         """
         Run the pipeline with multiple images as condition
@@ -374,6 +647,12 @@ class TrellisImageTo3DPipeline(Pipeline):
             sparse_structure_sampler_params (dict): Additional parameters for the sparse structure sampler.
             slat_sampler_params (dict): Additional parameters for the structured latent sampler.
             preprocess_image (bool): Whether to preprocess the image.
+            view_azimuths (Optional[Sequence[float]]): Per-image azimuths used by
+                ``view_aligned_stochastic`` to rotate the current latent around
+                the z axis before denoising and then rotate the predicted update
+                back to canonical coordinates.
+            view_reference_azimuth (float): Canonical front azimuth used to turn
+                absolute view azimuths into relative rotations.
         """
         if preprocess_image:
             images = [self.preprocess_image(image) for image in images]
@@ -381,9 +660,25 @@ class TrellisImageTo3DPipeline(Pipeline):
         cond['neg_cond'] = cond['neg_cond'][:1]
         torch.manual_seed(seed)
         ss_steps = {**self.sparse_structure_sampler_params, **sparse_structure_sampler_params}.get('steps')
-        with self.inject_sampler_multi_image('sparse_structure_sampler', len(images), ss_steps, mode=mode):
+        with self.inject_sampler_multi_image(
+            'sparse_structure_sampler',
+            len(images),
+            ss_steps,
+            mode=mode,
+            view_azimuths=view_azimuths,
+            view_reference_azimuth=view_reference_azimuth,
+            canonical_view_weighting=canonical_view_weighting,
+        ):
             coords = self.sample_sparse_structure(cond, num_samples, sparse_structure_sampler_params)
         slat_steps = {**self.slat_sampler_params, **slat_sampler_params}.get('steps')
-        with self.inject_sampler_multi_image('slat_sampler', len(images), slat_steps, mode=mode):
+        with self.inject_sampler_multi_image(
+            'slat_sampler',
+            len(images),
+            slat_steps,
+            mode=mode,
+            view_azimuths=view_azimuths,
+            view_reference_azimuth=view_reference_azimuth,
+            canonical_view_weighting=canonical_view_weighting,
+        ):
             slat = self.sample_slat(cond, coords, slat_sampler_params)
         return self.decode_slat(slat, formats)
