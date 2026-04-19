@@ -12,6 +12,42 @@ def resolve_patch_size(value) -> int:
     return int(value)
 
 
+def _infer_patch_size(
+    *,
+    total_tokens: int,
+    mask_width: int,
+    mask_height: int,
+    requested_patch_size: int,
+) -> int:
+    if requested_patch_size > 0:
+        grid_h = mask_height // requested_patch_size
+        grid_w = mask_width // requested_patch_size
+        patch_tokens = grid_h * grid_w
+        prefix_tokens = total_tokens - patch_tokens
+        if grid_h > 0 and grid_w > 0 and 0 <= prefix_tokens <= 64:
+            return requested_patch_size
+
+    valid_patch_sizes: list[tuple[int, int, int]] = []
+    max_patch_size = min(mask_width, mask_height)
+    for patch_size in range(1, max_patch_size + 1):
+        if mask_width % patch_size != 0 or mask_height % patch_size != 0:
+            continue
+        grid_h = mask_height // patch_size
+        grid_w = mask_width // patch_size
+        patch_tokens = grid_h * grid_w
+        if patch_tokens <= 0 or patch_tokens > total_tokens:
+            continue
+        prefix_tokens = total_tokens - patch_tokens
+        if 0 <= prefix_tokens <= 64:
+            valid_patch_sizes.append((prefix_tokens, -patch_tokens, patch_size))
+
+    if valid_patch_sizes:
+        _, _, patch_size = min(valid_patch_sizes)
+        return int(patch_size)
+
+    return requested_patch_size
+
+
 def mask_to_patch_selection(
     mask: Image.Image,
     patch_size: int,
@@ -72,6 +108,12 @@ def build_image_token_metadata(
         Dictionary with token metadata
     """
     total_tokens = int(cond.shape[1])
+    patch_size = _infer_patch_size(
+        total_tokens=total_tokens,
+        mask_width=int(mask.width),
+        mask_height=int(mask.height),
+        requested_patch_size=int(patch_size),
+    )
     edited_patch_grid, edited_patch_linear_indices, coverage_grid = mask_to_patch_selection(
         mask=mask,
         patch_size=patch_size,

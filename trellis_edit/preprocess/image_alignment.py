@@ -78,26 +78,31 @@ def composite_rgb_from_rgba(image: Image.Image, background: str = "black") -> Im
     return Image.fromarray((composited * 255).astype(np.uint8), mode="RGB")
 
 
+def prepare_rgb_for_rembg(image: Image.Image) -> Image.Image:
+    if image.mode == "RGBA":
+        return composite_rgb_from_rgba(image, background="white")
+    if has_useful_alpha(image):
+        return composite_rgb_from_rgba(image.convert("RGBA"), background="white")
+    return image.convert("RGB")
+
+
 def extract_foreground_rgba(
     image: Image.Image,
     pipeline,
     scale: float,
 ) -> Image.Image:
     image = scale_image(image, scale, Image.Resampling.LANCZOS)
-    if has_useful_alpha(image):
-        return image.convert("RGBA")
-
     if not _module_available("rembg"):
         raise RuntimeError(
             "rembg is not installed in the current environment. "
-            "Please install rembg or provide RGBA source/edit images with alpha."
+            "Please install rembg for source/edit foreground extraction."
         )
 
     import rembg
 
     if getattr(pipeline, "rembg_session", None) is None:
         pipeline.rembg_session = rembg.new_session("u2net")
-    output = rembg.remove(image.convert("RGB"), session=pipeline.rembg_session)
+    output = rembg.remove(prepare_rgb_for_rembg(image), session=pipeline.rembg_session)
     if not isinstance(output, Image.Image):
         raise RuntimeError("rembg did not return a PIL image as expected.")
     return output.convert("RGBA")

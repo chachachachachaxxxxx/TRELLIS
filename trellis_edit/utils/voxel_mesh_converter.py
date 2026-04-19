@@ -10,6 +10,43 @@ import torch
 import trimesh
 
 
+VOXEL_MESH_GLTF_ROTATION_3X3 = np.array(
+    [
+        [1.0, 0.0, 0.0],
+        [0.0, 0.0, -1.0],
+        [0.0, 1.0, 0.0],
+    ],
+    dtype=np.float32,
+)
+VOXEL_MESH_GLTF_TRANSFORM_4X4 = np.array(
+    [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ],
+    dtype=np.float32,
+)
+
+
+def voxel_mesh_glb_transform_payload() -> dict[str, object]:
+    """Return the axis-conversion metadata used for exported voxel GLBs."""
+    return {
+        "source_axis_convention": "z-up",
+        "target_axis_convention": "y-up",
+        "rotation_name": "rotate_x_minus_90_deg",
+        "rotation_matrix_3x3_row_vector": VOXEL_MESH_GLTF_ROTATION_3X3.tolist(),
+        "transform_matrix_4x4_column_vector": VOXEL_MESH_GLTF_TRANSFORM_4X4.tolist(),
+    }
+
+
+def orient_voxel_mesh_for_glb(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """Rotate a voxel mesh to match the same GLB axis convention as edit.glb."""
+    oriented = mesh.copy()
+    oriented.vertices = oriented.vertices @ VOXEL_MESH_GLTF_ROTATION_3X3
+    return oriented
+
+
 def coords_to_cubic_mesh(
     coords: torch.Tensor,
     resolution: int = 64,
@@ -109,6 +146,7 @@ def save_voxel_mesh(
         voxel_size: Size of each voxel (default 1.0/resolution)
     """
     mesh = coords_to_cubic_mesh(coords, resolution, voxel_size)
+    mesh = orient_voxel_mesh_for_glb(mesh)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     mesh.export(str(output_path))
     print(f"Saved voxel mesh to {output_path} ({len(coords)} voxels, {len(mesh.faces)} faces)")

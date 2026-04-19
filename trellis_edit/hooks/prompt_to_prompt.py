@@ -46,7 +46,6 @@ class PromptToPromptHook(AttentionHook):
         neg_cond: torch.Tensor,
         token_meta: dict,
         stage_configs: Dict[str, StageConfig],
-        query_chunk: int = 1024,
     ):
         """Initialize Prompt-to-Prompt hook.
 
@@ -56,7 +55,6 @@ class PromptToPromptHook(AttentionHook):
             neg_cond: Negative condition tensor
             token_meta: Token metadata from build_image_token_metadata
             stage_configs: Stage configurations
-            query_chunk: Query chunk size for attention computation
         """
         super().__init__()
         self.source_cond = source_cond
@@ -64,7 +62,6 @@ class PromptToPromptHook(AttentionHook):
         self.neg_cond_signature = self._tensor_signature(neg_cond)
         self.token_meta = token_meta
         self.stage_configs = stage_configs
-        self.query_chunk = max(1, int(query_chunk))
 
         self.current_forward_context: Optional[dict] = None
         self._index_cache: Dict[Tuple[str, str], Tuple[torch.Tensor, torch.Tensor]] = {}
@@ -161,7 +158,7 @@ class PromptToPromptHook(AttentionHook):
                 k_edit = attn_self.k_rms_norm(k_edit)
                 k_src = attn_self.k_rms_norm(k_src)
 
-            h = hook._chunked_prompt_to_prompt_attention(q, k_src, k_edit, v_edit, strength)
+            h = hook._prompt_to_prompt_attention(q, k_src, k_edit, v_edit, strength)
             h = h.reshape(batch_size, num_queries, -1)
             h = attn_self.to_out(h)
             return h
@@ -200,7 +197,7 @@ class PromptToPromptHook(AttentionHook):
                 k_edit = attn_self.k_rms_norm(k_edit)
                 k_src = attn_self.k_rms_norm(k_src)
 
-            h = hook._chunked_sparse_prompt_to_prompt_attention(q, k_src, k_edit, v_edit, strength)
+            h = hook._sparse_prompt_to_prompt_attention(q, k_src, k_edit, v_edit, strength)
             h = attn_self._reshape_chs(h, (-1,))
             h = attn_self._linear(attn_self.to_out, h)
             return h
@@ -269,7 +266,7 @@ class PromptToPromptHook(AttentionHook):
         mixed.index_copy_(dim=-1, index=edit_idx, source=replacement)
         return mixed
 
-    def _chunked_prompt_to_prompt_attention(
+    def _prompt_to_prompt_attention(
         self,
         q: torch.Tensor,
         k_src: torch.Tensor,
@@ -277,32 +274,26 @@ class PromptToPromptHook(AttentionHook):
         v_edit: torch.Tensor,
         strength: float,
     ) -> torch.Tensor:
-        """Compute Prompt-to-Prompt attention in chunks."""
-        batch_size, num_queries, _, head_dim = q.shape
+        """Compute Prompt-to-Prompt attention for the full query set."""
+        _, num_queries, _, head_dim = q.shape
         scale = 1.0 / math.sqrt(head_dim)
+        q_all = q.permute(0, 2, 1, 3).float()
         k_src_t = k_src.permute(0, 2, 3, 1).float()
         k_edit_t = k_edit.permute(0, 2, 3, 1).float()
         v_edit_h = v_edit.permute(0, 2, 1, 3).float()
-        out_chunks = []
 
-        for start in range(0, num_queries, self.query_chunk):
-            end = min(start + self.query_chunk, num_queries)
-            q_chunk = q[:, start:end].permute(0, 2, 1, 3).float()
+        scores_src = torch.matmul(q_all, k_src_t) * scale
+        scores_edit = torch.matmul(q_all, k_edit_t) * scale
+        scores_src = scores_src - scores_src.amax(dim=-1, keepdim=True)
+        scores_edit = scores_edit - scores_edit.amax(dim=-1, keepdim=True)
 
-            scores_src = torch.matmul(q_chunk, k_src_t) * scale
-            scores_edit = torch.matmul(q_chunk, k_edit_t) * scale
-            scores_src = scores_src - scores_src.amax(dim=-1, keepdim=True)
-            scores_edit = scores_edit - scores_edit.amax(dim=-1, keepdim=True)
+        attn_src = torch.softmax(scores_src, dim=-1)
+        attn_edit = torch.softmax(scores_edit, dim=-1)
+        attn_mix = self._mix_attention_maps(attn_src, attn_edit, strength)
+        out = torch.matmul(attn_mix, v_edit_h)
+        return out.permute(0, 2, 1, 3).reshape(q.shape[0], num_queries, q.shape[2], -1).to(q.dtype)
 
-            attn_src = torch.softmax(scores_src, dim=-1)
-            attn_edit = torch.softmax(scores_edit, dim=-1)
-            attn_mix = self._mix_attention_maps(attn_src, attn_edit, strength)
-            out_chunk = torch.matmul(attn_mix, v_edit_h)
-            out_chunks.append(out_chunk.permute(0, 2, 1, 3).to(q.dtype))
-
-        return torch.cat(out_chunks, dim=1)
-
-    def _chunked_sparse_prompt_to_prompt_attention(
+    def _sparse_prompt_to_prompt_attention(
         self,
         q,  # SparseTensor
         k_src: torch.Tensor,
@@ -324,29 +315,22 @@ class PromptToPromptHook(AttentionHook):
         for batch_idx in range(q.shape[0]):
             batch_slice = q.layout[batch_idx]
             q_batch = q.feats[batch_slice]
-            num_queries = q_batch.shape[0]
 
             k_src_batch = k_src[batch_idx].permute(1, 2, 0).float()
             k_edit_batch = k_edit[batch_idx].permute(1, 2, 0).float()
             v_edit_batch = v_edit[batch_idx].permute(1, 0, 2).float()
+            q_batch = q_batch.permute(1, 0, 2).float()
 
-            out_chunks = []
-            for start in range(0, num_queries, self.query_chunk):
-                end = min(start + self.query_chunk, num_queries)
-                q_chunk = q_batch[start:end].permute(1, 0, 2).float()
+            scores_src = torch.matmul(q_batch, k_src_batch) * scale
+            scores_edit = torch.matmul(q_batch, k_edit_batch) * scale
+            scores_src = scores_src - scores_src.amax(dim=-1, keepdim=True)
+            scores_edit = scores_edit - scores_edit.amax(dim=-1, keepdim=True)
 
-                scores_src = torch.matmul(q_chunk, k_src_batch) * scale
-                scores_edit = torch.matmul(q_chunk, k_edit_batch) * scale
-                scores_src = scores_src - scores_src.amax(dim=-1, keepdim=True)
-                scores_edit = scores_edit - scores_edit.amax(dim=-1, keepdim=True)
-
-                attn_src = torch.softmax(scores_src, dim=-1)
-                attn_edit = torch.softmax(scores_edit, dim=-1)
-                attn_mix = self._mix_attention_maps(attn_src, attn_edit, strength)
-                out_chunk = torch.matmul(attn_mix, v_edit_batch)
-                out_chunks.append(out_chunk.permute(1, 0, 2).to(q.dtype))
-
-            new_feats[batch_slice] = torch.cat(out_chunks, dim=0)
+            attn_src = torch.softmax(scores_src, dim=-1)
+            attn_edit = torch.softmax(scores_edit, dim=-1)
+            attn_mix = self._mix_attention_maps(attn_src, attn_edit, strength)
+            out = torch.matmul(attn_mix, v_edit_batch)
+            new_feats[batch_slice] = out.permute(1, 0, 2).to(q.dtype)
 
         return SparseTensor(feats=new_feats, coords=q.coords)
 

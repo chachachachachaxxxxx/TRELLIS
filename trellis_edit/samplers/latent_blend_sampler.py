@@ -5,13 +5,84 @@ Implements latent blending at each denoising step:
 - Supports both SS stage (dense latents) and SLAT stage (sparse features)
 """
 
+from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
+
 import numpy as np
 import torch
 from tqdm import tqdm
 from easydict import EasyDict as edict
 
 from trellis.pipelines.samplers.flow_euler import FlowEulerGuidanceIntervalSampler
+
+
+@dataclass(frozen=True)
+class SparseLatentBlendMask:
+    coords: torch.Tensor
+    edit_weights: Optional[torch.Tensor] = None
+
+
+def _resolve_sparse_latent_mask(
+    latent_mask: torch.Tensor | SparseLatentBlendMask,
+) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    if isinstance(latent_mask, SparseLatentBlendMask):
+        return latent_mask.coords, latent_mask.edit_weights
+    return latent_mask, None
+
+
+def blend_sparse_features(
+    sample,
+    source_latent,
+    latent_mask: torch.Tensor | SparseLatentBlendMask,
+) -> tuple[Any, dict[str, int]]:
+    preserve_coords, edit_weights = _resolve_sparse_latent_mask(latent_mask)
+    if preserve_coords.shape[0] == 0:
+        return sample, {
+            "preserve_coords": 0,
+            "sample_matches": 0,
+            "source_matches": 0,
+            "valid_matches": 0,
+        }
+
+    source_latent = source_latent.to(sample.coords.device)
+    preserve_coords = preserve_coords.to(sample.coords.device)
+
+    match_sample = (sample.coords.unsqueeze(1) == preserve_coords.unsqueeze(0)).all(dim=-1)
+    match_source = (source_latent.coords.unsqueeze(1) == preserve_coords.unsqueeze(0)).all(dim=-1)
+
+    preserve_in_sample = match_sample.any(dim=0)
+    preserve_in_source = match_source.any(dim=0)
+    valid_matches = preserve_in_sample & preserve_in_source
+    if not valid_matches.any():
+        return sample, {
+            "preserve_coords": int(preserve_coords.shape[0]),
+            "sample_matches": int(preserve_in_sample.sum().item()),
+            "source_matches": int(preserve_in_source.sum().item()),
+            "valid_matches": 0,
+        }
+
+    idx_sample = match_sample[:, valid_matches].float().argmax(0)
+    idx_source = match_source[:, valid_matches].float().argmax(0)
+
+    feats = sample.feats.clone()
+    source_feats = source_latent.feats.to(feats.device, feats.dtype)[idx_source]
+
+    if edit_weights is None:
+        feats[idx_sample] = source_feats
+    else:
+        blend_weights = edit_weights.to(device=feats.device, dtype=feats.dtype)
+        if blend_weights.ndim == 1:
+            blend_weights = blend_weights.unsqueeze(1)
+        blend_weights = blend_weights[valid_matches]
+        current_feats = feats[idx_sample].clone()
+        feats[idx_sample] = current_feats * blend_weights + source_feats * (1 - blend_weights)
+
+    return sample.replace(feats), {
+        "preserve_coords": int(preserve_coords.shape[0]),
+        "sample_matches": int(preserve_in_sample.sum().item()),
+        "source_matches": int(preserve_in_source.sum().item()),
+        "valid_matches": int(valid_matches.sum().item()),
+    }
 
 
 class LatentBlendFlowEulerSampler(FlowEulerGuidanceIntervalSampler):
@@ -29,14 +100,14 @@ class LatentBlendFlowEulerSampler(FlowEulerGuidanceIntervalSampler):
 
         # Blending state
         self.source_latent_cache: Optional[Dict[str, Any]] = None  # Cache of latents at each timestep
-        self.latent_mask: Optional[torch.Tensor] = None  # Blending mask
+        self.latent_mask: Optional[torch.Tensor | SparseLatentBlendMask] = None  # Blending mask
         self.blend_enabled: bool = False
         self.is_sparse: bool = False  # True for SLAT stage, False for SS stage
 
     def set_blend_source(
         self,
         source_latent_cache: Dict[str, Any],
-        latent_mask: torch.Tensor,
+        latent_mask: torch.Tensor | SparseLatentBlendMask,
         is_sparse: bool = False,
     ):
         """Set source latent cache and mask for blending.
@@ -47,7 +118,7 @@ class LatentBlendFlowEulerSampler(FlowEulerGuidanceIntervalSampler):
                 - Value: latent tensor at that timestep
             latent_mask: Blending mask
                 - SS stage: Tensor [B, C, D, H, W], 0=preserve source, 1=use edit
-                - SLAT stage: Tensor [N_preserve, 4] (coords of preserve region)
+                - SLAT stage: Tensor [N_preserve, 4] or SparseLatentBlendMask
             is_sparse: True for SLAT stage, False for SS stage
         """
         self.source_latent_cache = source_latent_cache
@@ -63,6 +134,7 @@ class LatentBlendFlowEulerSampler(FlowEulerGuidanceIntervalSampler):
             'last_preserve_coords': 0,
             'last_sample_match': 0,
             'last_source_match': 0,
+            'last_valid_match': 0,
         }
 
     def disable_blend(self):
@@ -137,47 +209,23 @@ class LatentBlendFlowEulerSampler(FlowEulerGuidanceIntervalSampler):
         # source_latent: SparseTensor (from cache, on CPU)
         # latent_mask: Tensor [N_preserve, 4] (coords of preserve region)
 
-        if self.latent_mask.shape[0] == 0:
+        preserve_coords, _ = _resolve_sparse_latent_mask(self.latent_mask)
+        if preserve_coords.shape[0] == 0:
             return sample
 
-        # Move source_latent to GPU
-        source_latent = source_latent.to(sample.coords.device)
-
-        # Find matching coords between sample and preserve region
-        preserve_coords = self.latent_mask.to(sample.coords.device)
-
-        # Match sample coords with preserve coords
-        match_sample = (sample.coords.unsqueeze(1) == preserve_coords.unsqueeze(0)).all(dim=-1)
-        # Match source coords with preserve coords
-        match_source = (source_latent.coords.unsqueeze(1) == preserve_coords.unsqueeze(0)).all(dim=-1)
-
-        # Count overlaps for statistics
-        n_sample_match = match_sample.any(dim=1).sum().item()
-        n_source_match = match_source.any(dim=1).sum().item()
+        sample, blend_stats = blend_sparse_features(sample, source_latent, self.latent_mask)
 
         # Update statistics
-        if hasattr(self, 'stats'):
-            self.stats['blend_calls'] += 1
-            self.stats['last_sample_voxels'] = sample.coords.shape[0]
-            self.stats['last_source_voxels'] = source_latent.coords.shape[0]
-            self.stats['last_preserve_coords'] = preserve_coords.shape[0]
-            self.stats['last_sample_match'] = n_sample_match
-            self.stats['last_source_match'] = n_source_match
+        if hasattr(self, "stats"):
+            self.stats["blend_calls"] += 1
+            self.stats["last_sample_voxels"] = sample.coords.shape[0]
+            self.stats["last_source_voxels"] = source_latent.coords.shape[0]
+            self.stats["last_preserve_coords"] = blend_stats["preserve_coords"]
+            self.stats["last_sample_match"] = blend_stats["sample_matches"]
+            self.stats["last_source_match"] = blend_stats["source_matches"]
+            self.stats["last_valid_match"] = blend_stats["valid_matches"]
 
-        if not match_sample.any() or not match_source.any():
-            return sample
-
-        # Get indices
-        idx_sample = match_sample.float().argmax(0)
-        idx_source = match_source.float().argmax(0)
-
-        # Replace features at preserve region
-        feats = sample.feats.clone()
-        source_feats = source_latent.feats.to(feats.device, feats.dtype)
-        feats[idx_sample] = source_feats[idx_source]
-
-        # Create new SparseTensor
-        return sample.replace(feats)
+        return sample
 
     @torch.no_grad()
     def sample_once(

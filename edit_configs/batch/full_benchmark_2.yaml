@@ -1,11 +1,11 @@
 # ============================================================
-# 完整批量评测示例：UniEdit 全流程
+# 完整批量评测示例：UniEdit 全流程，入口与方法选择已解耦
 #
 # 用法:
 #   python run_batch_edit_and_eval.py --config edit_configs/batch/full_benchmark_2.yaml
 # ============================================================
 
-entrypoint: uniedit_full
+entrypoint: edit_full
 
 runtime:
   model: microsoft/TRELLIS-image-large
@@ -18,36 +18,52 @@ runtime:
 
 preprocess:
   crop_policy: union_crop
-  foreground_policy: alpha_or_rembg
   mask_policy: provided
 
 ss:
+  method: uniedit
   sampler:
     steps: 25
-  omega: 1.0
-  cfg_interval: [0.5, 1.0]
-  output_format: both
-  save_voxel_mesh: true
+  inversion:
+    enabled: true
+    denoise_init: inverted_terminal_noise
+  controls:
+    uniedit:
+      enabled: true
+      omega: 1.0
+      cfg_interval: [0.5, 1.0]
+  output:
+    output_format: both
+    save_voxel_mesh: true
 
 slat:
+  method: uniedit
   sampler:
     steps: 25
-  omega: 1.0
-  cfg_interval: [0.5, 1.0]
-  stage2_variant: preserve_uniedit
-  decode_modes: [gaussian, mesh]
+  inversion:
+    enabled: true
+    denoise_init: terminal_noise
+  controls:
+    uniedit:
+      enabled: true
+      omega: 1.0
+      cfg_interval: [0.5, 1.0]
+      stage2_variant: preserve_uniedit
+  decode:
+    modes: [gaussian, mesh]
 
 batch:
   config_name: uniedit_full_benchmark
-  gt_root: /home/wangxinxing/code/Edit3Dpp/data
-  assets_root: /cache/wangxinxing/data/temp/renders
+  gt_root: /cache/wangxinxing/data/trellis_edit_benchmark/edit3d_data/data
+  assets_root: /cache/wangxinxing/data/trellis_edit_benchmark/edit3d_data/renders
   pred_root: /cache/wangxinxing/data/temp/uniedit_full_benchmark
   metrics:
     - psnr
     - ssim
     - lpips
     - fid
-    - dino_if
+    - dino_if_max
+    - dino_if_mean
     - chamfer
     - clip_t
   skip_benchmark_render: false

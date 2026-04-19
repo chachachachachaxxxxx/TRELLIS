@@ -62,7 +62,9 @@ class ComposableExperimentRunner:
         return pipeline
 
     def _load_inputs(self) -> LoadedInputs:
-        source_image = _load_required_image(self.config.inputs.source_image, "source_image")
+        source_image = None
+        if self.config.inputs.source_image is not None:
+            source_image = _load_required_image(self.config.inputs.source_image, "source_image")
         edit_image = _load_required_image(self.config.inputs.edit_image, "edit_image")
         mask_image = None
         if self.config.inputs.mask_image is not None:
@@ -93,7 +95,7 @@ class ComposableExperimentRunner:
         pipeline = self._load_pipeline()
         loaded_inputs = self._load_inputs()
         layout = build_experiment_output_layout(
-            method_name=self.config.entry_name,
+            method_name=self.config.runtime.output_group or self.config.entry_name,
             case_name=self.config.runtime.case_name,
             outputs_root=self.config.runtime.output_root,
         )
@@ -120,10 +122,10 @@ class ComposableExperimentRunner:
                 raise RuntimeError("Missing ss config")
             ensure_dir(context.ss_dir)
             save_preprocessed_inputs(context.ss_dir, preprocess_artifact.prepared_inputs, include_mask=True)
-            ss_plugin = SS_PLUGIN_REGISTRY[self.config.ss.plugin_name]()
+            ss_plugin = SS_PLUGIN_REGISTRY[self.config.ss.method]()
             try:
-                ss_artifact = ss_plugin.run(context, preprocess_artifact, self.config.ss.config)
-                ss_artifact.artifact_paths = ss_plugin.save(ss_artifact, context.ss_dir, self.config.ss.config)
+                ss_artifact = ss_plugin.run(context, preprocess_artifact, self.config.ss)
+                ss_artifact.artifact_paths = ss_plugin.save(ss_artifact, context.ss_dir, self.config.ss)
                 ss_artifact.primary_coords_path = self._primary_coords_path(ss_artifact)
                 result.ss = ss_artifact
             finally:
@@ -134,10 +136,10 @@ class ComposableExperimentRunner:
                 raise RuntimeError("Missing slat config")
             ensure_dir(context.slat_dir)
             save_preprocessed_inputs(context.slat_dir, preprocess_artifact.prepared_inputs, include_mask=True)
-            slat_plugin = SLAT_PLUGIN_REGISTRY[self.config.slat.plugin_name]()
+            slat_plugin = SLAT_PLUGIN_REGISTRY[self.config.slat.method]()
             try:
-                slat_artifact = slat_plugin.run(context, preprocess_artifact, self.config.slat.config, ss_artifact)
-                slat_artifact.artifact_paths = slat_plugin.save(slat_artifact, context.slat_dir, self.config.slat.config)
+                slat_artifact = slat_plugin.run(context, preprocess_artifact, self.config.slat, ss_artifact)
+                slat_artifact.artifact_paths = slat_plugin.save(slat_artifact, context.slat_dir, self.config.slat)
                 if self.config.runtime.save_source_outputs and slat_artifact.source_outputs is not None:
                     source_dir = ensure_dir(layout.source_original_dir)
                     save_outputs(

@@ -1,11 +1,11 @@
 # ============================================================
-# 完整批量评测示例：P2P + latent blend 全流程
+# 完整批量评测示例：P2P 全流程；latent blend 由 stage 配置单独控制
 #
 # 用法:
 #   python run_batch_edit_and_eval.py --config edit_configs/batch/full_benchmark.yaml
 # ============================================================
 
-entrypoint: p2p_latent_blend_full
+entrypoint: edit_full
 
 runtime:
   model: microsoft/TRELLIS-image-large
@@ -18,41 +18,54 @@ runtime:
 
 preprocess:
   crop_policy: union_crop
-  foreground_policy: alpha_or_rembg
   mask_policy: provided
 
 ss:
   sampler:
     steps: 25
-  inversion_mode: simple
-  blend_enabled: true
-  blend_strength: 1.0
-  hook:
-    t_start: 1.0
-    t_end: 0.3
-    strength: 1.0
-  denoise_cfg_strength: 5.0
-  denoise_cfg_interval: [0.5, 1.0]
-  inversion_cfg_strength: 6.0
-  inversion_cfg_interval: [0.5, 1.0]
-  output_format: both
-  save_voxel_mesh: true
+  inversion:
+    enabled: true
+    denoise_init: inverted_terminal_noise
+    solver: simple
+    denoise_cfg_strength: 5.0
+    denoise_cfg_interval: [0.5, 1.0]
+    inversion_cfg_strength: 6.0
+    inversion_cfg_interval: [0.5, 1.0]
+  controls:
+    p2p:
+      enabled: true
+      t_start: 1.0
+      t_end: 0.3
+      strength: 1.0
+    latent_blend:
+      enabled: true
+      strength: 1.0
+  output:
+    output_format: both
+    save_voxel_mesh: true
 
 slat:
   sampler:
     steps: 25
-  inversion_mode: simple
-  blend_enabled: true
-  hook:
-    t_start: 0.8
-    t_end: 0.0
-    strength: 1.0
-  skip_source_decode: true
+  inversion:
+    enabled: true
+    denoise_init: terminal_noise
+    solver: simple
+  controls:
+    p2p:
+      enabled: true
+      t_start: 0.8
+      t_end: 0.0
+      strength: 1.0
+    latent_blend:
+      enabled: true
+  decode:
+    skip_source_decode: true
 
 batch:
   config_name: full_benchmark
-  gt_root: /home/wangxinxing/code/Edit3Dpp/data
-  assets_root: /cache/wangxinxing/data/temp/renders
+  gt_root: /cache/wangxinxing/data/trellis_edit_benchmark/edit3d_data/data
+  assets_root: /cache/wangxinxing/data/trellis_edit_benchmark/edit3d_data/renders
   pred_root: /cache/wangxinxing/data/temp/p2p_latent_blend_full_benchmark
   # dataset: GSO
   # max_cases: 50
@@ -61,7 +74,8 @@ batch:
     - ssim
     - lpips
     - fid
-    - dino_if
+    - dino_if_max
+    - dino_if_mean
     - chamfer
     - clip_t
   skip_benchmark_render: false

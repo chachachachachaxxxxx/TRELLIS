@@ -14,6 +14,15 @@ from .asset_3d import (
     project_sparse_terminal_noise,
     sparse_batch_slice,
 )
+from .foreground_scale_selection import (
+    ActiveBBox,
+    build_square_crop_box,
+    compute_active_bbox,
+    compute_sparse_structure_metrics,
+    normalize_sparse_coords,
+    select_crop_scale_from_linear_fit,
+    select_crop_scale_from_probes,
+)
 from .image_alignment import (
     PROC_IMAGE_SIZE,
     CropContext,
@@ -37,6 +46,7 @@ from .source_assets import (
 __all__ = [
     "MaskGLBResult",
     "PROC_IMAGE_SIZE",
+    "ActiveBBox",
     "CropContext",
     "PreparedEditCondition",
     "PreparedInputs",
@@ -44,7 +54,10 @@ __all__ = [
     "binarize_mask_image",
     "build_auto_mask",
     "build_blank_mask",
+    "build_square_crop_box",
     "build_union_crop_context",
+    "compute_active_bbox",
+    "compute_sparse_structure_metrics",
     "composite_rgb_from_rgba",
     "coords_to_flat_indices",
     "coords_to_voxel",
@@ -58,6 +71,7 @@ __all__ = [
     "load_mask_glb_coords",
     "load_ply_positions",
     "load_source_voxel_normalization",
+    "normalize_sparse_coords",
     "ply_to_coords",
     "prepare_aligned_inputs",
     "prepare_edit_condition_image",
@@ -65,5 +79,7 @@ __all__ = [
     "save_edit_condition_artifacts",
     "save_preprocessed_inputs",
     "scale_image",
+    "select_crop_scale_from_linear_fit",
+    "select_crop_scale_from_probes",
     "sparse_batch_slice",
 ]

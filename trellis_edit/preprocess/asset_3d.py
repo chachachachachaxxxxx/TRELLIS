@@ -305,6 +305,7 @@ def project_sparse_terminal_noise(
     device: torch.device,
     SparseTensor,
     resolution: int = 64,
+    preserve_coords: Optional[torch.Tensor] = None,
 ):
     if target_coords.ndim != 2 or target_coords.shape[1] not in (3, 4):
         raise ValueError(f"Expected target_coords shape [N, 3] or [N, 4], got {tuple(target_coords.shape)}")
@@ -316,6 +317,24 @@ def project_sparse_terminal_noise(
             ],
             dim=1,
         )
+    else:
+        target_coords = target_coords.int()
+
+    if preserve_coords is not None:
+        if preserve_coords.ndim != 2 or preserve_coords.shape[1] not in (3, 4):
+            raise ValueError(
+                f"Expected preserve_coords shape [N, 3] or [N, 4], got {tuple(preserve_coords.shape)}"
+            )
+        if preserve_coords.shape[1] == 3:
+            preserve_coords = torch.cat(
+                [
+                    torch.zeros((preserve_coords.shape[0], 1), dtype=torch.int32, device=preserve_coords.device),
+                    preserve_coords.int(),
+                ],
+                dim=1,
+            )
+        else:
+            preserve_coords = preserve_coords.int()
 
     batch_size = int(target_coords[:, 0].max().item()) + 1 if target_coords.numel() > 0 else 1
     feature_dim = source_noise.feats.shape[1]
@@ -337,6 +356,14 @@ def project_sparse_terminal_noise(
 
         src_codes = coords_to_flat_indices(src_coords, resolution)
         tgt_codes = coords_to_flat_indices(tgt_coords, resolution)
+        preserve_target = torch.ones_like(tgt_codes, dtype=torch.bool, device=tgt_codes.device)
+        if preserve_coords is not None:
+            preserve_batch = preserve_coords[preserve_coords[:, 0] == batch_idx][:, 1:]
+            if preserve_batch.shape[0] == 0:
+                preserve_target = torch.zeros_like(tgt_codes, dtype=torch.bool, device=tgt_codes.device)
+            else:
+                preserve_codes = coords_to_flat_indices(preserve_batch, resolution)
+                preserve_target = torch.isin(tgt_codes, preserve_codes)
         randn_feats = torch.randn(
             tgt_coords.shape[0],
             feature_dim,
@@ -350,6 +377,7 @@ def project_sparse_terminal_noise(
             valid = insert_pos < src_codes_sorted.shape[0]
             matched = valid.clone()
             matched[valid] = src_codes_sorted[insert_pos[valid]] == tgt_codes[valid]
+            matched &= preserve_target
             if matched.any():
                 matched_order = order[insert_pos[matched]]
                 randn_feats[matched] = src_feats_full[matched_order]

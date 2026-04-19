@@ -12,17 +12,15 @@ from trellis_edit.common import ExperimentOutputLayout
 from .artifacts import PreprocessArtifact, SLATArtifact, SSArtifact
 from .config import (
     ExperimentConfig,
-    P2PLatentBlendSLATConfig,
-    P2PLatentBlendSSConfig,
     PreprocessConfig,
-    UniEditSLATConfig,
-    UniEditSSConfig,
+    SLATStageConfig,
+    SSStageConfig,
 )
 
 
 @dataclass(frozen=True)
 class LoadedInputs:
-    source_image: Image.Image
+    source_image: Image.Image | None
     edit_image: Image.Image
     mask_image: Image.Image | None
 
@@ -67,7 +65,7 @@ class SSStagePlugin(ABC):
         self,
         context: ExperimentContext,
         preprocess: PreprocessArtifact,
-        config: UniEditSSConfig | P2PLatentBlendSSConfig,
+        config: SSStageConfig,
     ) -> SSArtifact:
         raise NotImplementedError
 
@@ -76,7 +74,7 @@ class SSStagePlugin(ABC):
         self,
         artifact: SSArtifact,
         out_dir: Path,
-        config: UniEditSSConfig | P2PLatentBlendSSConfig,
+        config: SSStageConfig,
     ) -> dict[str, str]:
         raise NotImplementedError
 
@@ -92,7 +90,7 @@ class SLATStagePlugin(ABC):
         self,
         context: ExperimentContext,
         preprocess: PreprocessArtifact,
-        config: UniEditSLATConfig | P2PLatentBlendSLATConfig,
+        config: SLATStageConfig,
         ss_artifact: SSArtifact | None,
     ) -> SLATArtifact:
         raise NotImplementedError
@@ -102,7 +100,7 @@ class SLATStagePlugin(ABC):
         self,
         artifact: SLATArtifact,
         out_dir: Path,
-        config: UniEditSLATConfig | P2PLatentBlendSLATConfig,
+        config: SLATStageConfig,
     ) -> dict[str, str]:
         raise NotImplementedError
 

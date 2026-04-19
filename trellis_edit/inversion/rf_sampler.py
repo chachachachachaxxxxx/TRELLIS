@@ -11,6 +11,62 @@ import torch
 from tqdm import tqdm
 
 
+def build_rescaled_t_seq(steps: int, rescale_t: float) -> np.ndarray:
+    """Build the shared monotonic time grid used by inversion and denoising."""
+    total_steps = int(steps)
+    if total_steps <= 0:
+        raise ValueError(f"steps must be > 0, got {total_steps}")
+
+    rescale_t = float(rescale_t)
+    t_seq = np.linspace(0.0, 1.0, total_steps + 1)
+    return rescale_t * t_seq / (1.0 + (rescale_t - 1.0) * t_seq)
+
+
+def resolve_inversion_steps(total_steps: int, inversion_steps: Optional[int]) -> int:
+    """Resolve the effective inversion depth against the full schedule length."""
+    total_steps = int(total_steps)
+    if total_steps <= 0:
+        raise ValueError(f"total_steps must be > 0, got {total_steps}")
+
+    if inversion_steps is None:
+        return total_steps
+
+    resolved = int(inversion_steps)
+    if resolved <= 0:
+        raise ValueError(f"inversion_steps must be > 0, got {resolved}")
+    if resolved > total_steps:
+        raise ValueError(
+            f"inversion_steps must be <= total_steps, got {resolved} > {total_steps}"
+        )
+    return resolved
+
+
+def build_inversion_t_pairs(
+    steps: int,
+    rescale_t: float,
+    inversion_steps: Optional[int] = None,
+) -> tuple[list[tuple[float, float]], int]:
+    """Build forward data->noise timestep pairs up to the requested inversion depth."""
+    total_steps = int(steps)
+    stop_step = resolve_inversion_steps(total_steps, inversion_steps)
+    t_seq = build_rescaled_t_seq(total_steps, rescale_t)
+    t_pairs = [(float(t_seq[i]), float(t_seq[i + 1])) for i in range(stop_step)]
+    return t_pairs, stop_step
+
+
+def build_denoise_t_pairs(
+    steps: int,
+    rescale_t: float,
+    start_step: Optional[int] = None,
+) -> tuple[list[tuple[float, float]], int]:
+    """Build reverse noise->data timestep pairs from the requested starting point."""
+    total_steps = int(steps)
+    resolved_start_step = resolve_inversion_steps(total_steps, start_step)
+    t_seq = build_rescaled_t_seq(total_steps, rescale_t)
+    t_pairs = [(float(t_seq[i]), float(t_seq[i - 1])) for i in range(resolved_start_step, 0, -1)]
+    return t_pairs, resolved_start_step
+
+
 class RFSolverSampler:
     """RF-Solver: Taylor-improved second-order flow sampler from VoxHammer.
 
@@ -102,8 +158,8 @@ class RFSolverSampler:
     ):
         """Single sampling step with second-order Taylor correction.
 
-        Implements VoxHammer's RF-Solver update rule:
-            x_{t+h} = x_t + h·f(x_t, t) - ½·h²·∂_t f(x_t, t)
+        Uses the second-order Taylor update:
+            x_{t+h} = x_t + h·f(x_t, t) + ½·h²·∂_t f(x_t, t)
 
         where ∂_t f is approximated via midpoint finite difference.
         """
@@ -129,9 +185,10 @@ class RFSolverSampler:
         # Recompute first prediction (needed for second-order correction)
         pred = self._guided_prediction(model, sample, t_curr, cond_dict, cfg_strength, cfg_interval)
 
-        # Compute second-order correction
+        # With first_order := (pred_mid - pred) / (dt / 2), the Taylor
+        # correction enters with a plus sign.
         first_order = (pred_mid - pred) / (0.5 * dt)
-        result = sample + dt * pred - 0.5 * (dt**2) * first_order
+        result = sample + dt * pred + 0.5 * (dt**2) * first_order
 
         # Clean up intermediate tensors
         del pred, sample_mid, pred_mid, first_order
@@ -152,6 +209,7 @@ class RFSolverSampler:
         cfg_strength: float,
         cfg_interval: Tuple[float, float],
         inverse: bool,
+        start_step: Optional[int] = None,
         verbose: bool = True,
     ):
         """Run full RF-Solver sampling process.
@@ -165,19 +223,27 @@ class RFSolverSampler:
             cfg_strength: CFG strength
             cfg_interval: CFG interval (start, end)
             inverse: If True, run inverse (data → noise), else forward (noise → data)
+            start_step: When set, truncate inversion at this step index and start
+                denoising from the same intermediate point instead of t=1.
             verbose: Show progress bar
 
         Returns:
             Final sample
         """
-        t_seq = np.linspace(1.0, 0.0, int(steps) + 1)
-        t_seq = rescale_t * t_seq / (1.0 + (rescale_t - 1.0) * t_seq)
         if inverse:
-            t_seq = t_seq[::-1]
+            t_pairs, _ = build_inversion_t_pairs(
+                steps=steps,
+                rescale_t=rescale_t,
+                inversion_steps=start_step,
+            )
             desc = "RF-Solver inversion"
         else:
+            t_pairs, _ = build_denoise_t_pairs(
+                steps=steps,
+                rescale_t=rescale_t,
+                start_step=start_step,
+            )
             desc = "RF-Solver denoise"
-        t_pairs = [(float(t_seq[i]), float(t_seq[i + 1])) for i in range(len(t_seq) - 1)]
         for t_curr, t_next in tqdm(t_pairs, desc=desc, disable=not verbose):
             sample = self.sample_once(model, sample, t_curr, t_next, cond_dict, cfg_strength, cfg_interval)
         return sample

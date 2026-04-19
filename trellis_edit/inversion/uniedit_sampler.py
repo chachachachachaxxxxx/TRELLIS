@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from typing import Optional, Tuple
 
-import numpy as np
 import torch
 from tqdm import tqdm
 
-from .rf_sampler import RFSolverSampler
+from .rf_sampler import RFSolverSampler, build_denoise_t_pairs
 
 
 def _dense_scalar_field(x: torch.Tensor) -> torch.Tensor:
@@ -269,9 +268,11 @@ class UniEditRFSolver(RFSolverSampler):
             mode=mode,
         )
 
-        # Compute second-order correction
+        # Keep the same first_order convention as the shared RF solver:
+        # first_order := (pred_mid - pred) / (dt / 2), so the Taylor
+        # correction uses a plus sign.
         first_order = (pred_mid - pred) / (0.5 * dt)
-        result = sample + dt * pred - 0.5 * (dt ** 2) * first_order
+        result = sample + dt * pred + 0.5 * (dt ** 2) * first_order
 
         # Clean up intermediate tensors
         del pred, sample_mid, pred_mid, first_order
@@ -294,6 +295,7 @@ class UniEditRFSolver(RFSolverSampler):
         cfg_strength: float,
         cfg_interval: Tuple[float, float],
         omega: float,
+        start_step: Optional[int] = None,
         selector: Optional[torch.Tensor] = None,
         mode: str = "full_uniedit",
         verbose: bool = True,
@@ -311,6 +313,7 @@ class UniEditRFSolver(RFSolverSampler):
             cfg_strength: CFG strength
             cfg_interval: CFG interval (start, end)
             omega: UniEdit omega parameter
+            start_step: Optional intermediate timestep index to start denoising from
             selector: Optional selector for preserve_overlap mode
             mode: Fusion mode (full_uniedit, preserve_overlap, target_only)
             verbose: Show progress bar
@@ -318,9 +321,11 @@ class UniEditRFSolver(RFSolverSampler):
         Returns:
             Denoised sample
         """
-        t_seq = np.linspace(1.0, 0.0, int(steps) + 1)
-        t_seq = rescale_t * t_seq / (1.0 + (rescale_t - 1.0) * t_seq)
-        t_pairs = list((float(t_seq[i]), float(t_seq[i + 1])) for i in range(len(t_seq) - 1))
+        t_pairs, _ = build_denoise_t_pairs(
+            steps=steps,
+            rescale_t=rescale_t,
+            start_step=start_step,
+        )
 
         desc_map = {
             "full_uniedit": "UniEdit RF-Solver denoise",

@@ -20,6 +20,7 @@ For voxel visualizations, prefer cubic voxel rendering in the style of [`vis/vis
 
 ## Current Migration Rule
 For the current stage-separation and P2P cleanup work, do not add compatibility layers for old method names, old parameter names, or old stage names. When a naming scheme changes, update the codebase to the new naming directly and delete the old path instead of mapping or aliasing it.
+For the current editing-config refactor work, do not keep or read stale configs, stale generated configs, or stale result directories after the new path replaces them. Delete old configs and old results directly unless the user explicitly asks to preserve or inspect them.
 
 ## Testing Guidelines
 This repo relies on smoke tests more than a full `pytest` suite. Add validators as `test_<area>.py`, and keep GPU regressions reproducible through example scripts or shell runners. For editing changes, verify the narrowest affected flow first, then record the command, backend, seed, and output path.

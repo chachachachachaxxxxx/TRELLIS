@@ -67,6 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--slat-steps", type=int, default=None, help="Override SLAT sampling steps.")
     parser.add_argument("--num-samples", type=int, default=None, help="Override sample count.")
     parser.add_argument("--output-root", default="", help="Override output root.")
+    parser.add_argument("--output-group", default="", help="Override output grouping name.")
     parser.add_argument("--save-source-outputs", action="store_true", help="Save source decode outputs for SLAT runs.")
     parser.add_argument("--device", type=str, default="cuda:0", help="Device to use (default: cuda:0).")
     parser.add_argument("--dry-run", action="store_true", help="Resolve inputs and print the final experiment config.")
@@ -128,6 +129,7 @@ def _build_runtime(args) -> RuntimeConfig:
         seed=int(args.seed if args.seed is not None else 42),
         device=str(args.device),
         output_root=output_root,
+        output_group=str(args.output_group or ""),
         num_samples=int(args.num_samples or 1),
         attn_backend=str(args.attn_backend or ""),
         sparse_attn_backend=str(args.sparse_attn_backend or ""),
@@ -167,10 +169,7 @@ def _apply_config_overrides(base_config, config_data: dict[str, Any]):
             raise RuntimeError(f"{config.entry_name} does not expose an ss stage")
         config = replace(
             config,
-            ss=replace(
-                config.ss,
-                config=_apply_dataclass_overrides(config.ss.config, ss_overrides, "ss"),
-            ),
+            ss=_apply_dataclass_overrides(config.ss, ss_overrides, "ss"),
         )
 
     slat_overrides = config_data.get("slat")
@@ -179,10 +178,7 @@ def _apply_config_overrides(base_config, config_data: dict[str, Any]):
             raise RuntimeError(f"{config.entry_name} does not expose a slat stage")
         config = replace(
             config,
-            slat=replace(
-                config.slat,
-                config=_apply_dataclass_overrides(config.slat.config, slat_overrides, "slat"),
-            ),
+            slat=_apply_dataclass_overrides(config.slat, slat_overrides, "slat"),
         )
 
     return config
@@ -250,6 +246,8 @@ def _load_config(args, parser: argparse.ArgumentParser) -> dict[str, Any]:
         args.num_samples = runtime_config["num_samples"]
     if not args.output_root and (value := nested_value(runtime_config, "output_root")) is not None:
         args.output_root = value
+    if not args.output_group and (value := nested_value(runtime_config, "output_group")) is not None:
+        args.output_group = value
     if args.device == default_device and (value := nested_value(runtime_config, "device")) is not None:
         args.device = value
 
@@ -287,10 +285,7 @@ def run_entrypoint(entrypoint_name: str, args, config_data: dict[str, Any]) -> i
             raise RuntimeError(f"{config.entry_name} does not expose an ss stage")
         config = replace(
             config,
-            ss=replace(
-                config.ss,
-                config=replace(config.ss.config, sampler=replace(config.ss.config.sampler, steps=args.ss_steps)),
-            ),
+            ss=replace(config.ss, sampler=replace(config.ss.sampler, steps=args.ss_steps)),
         )
 
     if args.slat_steps is not None:
@@ -298,10 +293,7 @@ def run_entrypoint(entrypoint_name: str, args, config_data: dict[str, Any]) -> i
             raise RuntimeError(f"{config.entry_name} does not expose a slat stage")
         config = replace(
             config,
-            slat=replace(
-                config.slat,
-                config=replace(config.slat.config, sampler=replace(config.slat.config.sampler, steps=args.slat_steps)),
-            ),
+            slat=replace(config.slat, sampler=replace(config.slat.sampler, steps=args.slat_steps)),
         )
 
     config.validate_inputs()
@@ -313,7 +305,7 @@ def run_entrypoint(entrypoint_name: str, args, config_data: dict[str, Any]) -> i
     runner = ComposableExperimentRunner(config)
     runner.run()
     layout = build_experiment_output_layout(
-        method_name=config.entry_name,
+        method_name=config.runtime.output_group or config.entry_name,
         case_name=config.runtime.case_name,
         outputs_root=config.runtime.output_root,
     )
