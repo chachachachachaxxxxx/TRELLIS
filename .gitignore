@@ -404,3 +404,8 @@ assets
 wiki/
 exp/
 vis/trellis_text_xlarge_trace
+checkpoint/
+checkpoints/
+cache_run/
+edit_configs/ablations/generated/
+temp/
