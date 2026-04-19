@@ -1,0 +1,30 @@
+# ============================================================
+# baseline1: 直接使用编辑后的 2D 图像做 TRELLIS 3D 生成
+#
+# 用法:
+#   python run_edit_image_direct.py --config edit_configs/baselines/baseline1_direct_edit_image.yaml
+# ============================================================
+
+entrypoint: edit_image_direct
+
+runtime:
+  case_name: baseline1_direct_edit_image
+  model: microsoft/TRELLIS-image-large
+  seed: 1
+  device: cuda:0
+  output_root: outputs/baselines
+  spconv_algo: native
+  skip_render: true
+  skip_glb: false
+  skip_ply: false
+
+inputs:
+  edit_image: assets/edit_example/images/2d_edit.png
+
+direct:
+  ss_sampler:
+    steps: 25
+  slat_sampler:
+    steps: 25
+  formats: [mesh, gaussian]
+  preprocess_image: true
