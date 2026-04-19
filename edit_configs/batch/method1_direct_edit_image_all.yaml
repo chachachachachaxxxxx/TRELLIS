@@ -1,0 +1,84 @@
+# ============================================================
+# 全量批量评测：方法 1（直接编辑图像）
+#
+# 来源：
+# - edit_configs/baselines/baseline1_direct_edit_image.yaml
+#
+# 说明：
+# - 单案例配置里的 inputs.edit_image 是固定示例图，这里改成按 case 动态解析。
+# - mask_policy 保持 blank，因此不依赖数据集提供的 2D mask。
+#
+# 用法:
+#   python run_batch_edit_and_eval_compact.py \
+#     --config edit_configs/batch/method1_direct_edit_image_all.yaml \
+#     --gpus 0,1,2,3 \
+#     --device cuda:0
+# ============================================================
+
+entrypoint: edit_full
+
+runtime:
+  model: microsoft/TRELLIS-image-large
+  seed: 1
+  device: cuda:0
+  spconv_algo: native
+  skip_render: true
+  skip_glb: false
+  skip_ply: false
+
+preprocess:
+  crop_policy: union_crop
+  mask_policy: blank
+  adaptive_foreground_scale:
+    enabled: false
+
+ss:
+  sampler:
+    steps: 25
+  inversion:
+    enabled: false
+    denoise_init: random_noise
+  controls:
+    p2p:
+      enabled: false
+    latent_blend:
+      enabled: false
+    uniedit:
+      enabled: false
+
+slat:
+  sampler:
+    steps: 25
+  inversion:
+    enabled: false
+    denoise_init: random_noise
+  controls:
+    p2p:
+      enabled: false
+    latent_blend:
+      enabled: false
+    uniedit:
+      enabled: false
+  decode:
+    skip_source_decode: true
+    modes: [mesh, gaussian]
+
+batch:
+  config_name: method1_direct_edit_image_all
+  gt_root: /cache/wangxinxing/data/trellis_edit_benchmark/edit3d_data/data
+  pred_root: /cache/wangxinxing/data/trellis_edit_benchmark/pred/baseline1_trellis_direct_edit_by_image
+  metrics:
+    - psnr
+    - ssim
+    - lpips
+    - fid
+    - dino_if_max
+    - dino_if_mean
+    - chamfer
+    - clip_t
+  skip_benchmark_render: false
+  skip_exists: true
+  keep_case_outputs: false
+  input_templates:
+    source_image: "{gt_root}/{dataset}/{object_name}/prompt_{prompt_id}/2d_render.png"
+    edit_image: "{gt_root}/{dataset}/{object_name}/prompt_{prompt_id}/2d_edit.png"

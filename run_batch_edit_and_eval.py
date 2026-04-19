@@ -19,19 +19,40 @@ import subprocess
 import sys
 import time
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from trellis_edit.common import build_experiment_output_layout, ensure_dir
+from trellis_edit.common import build_experiment_output_layout, ensure_dir, write_json
+from trellis_edit.benchmarking import (
+    DEFAULT_BENCHMARK_ROOT,
+    build_daily_index,
+    build_focus_index,
+    create_daily_benchmark_bundle,
+)
 from trellis_edit.composable import get_entrypoint, has_entrypoint
+from trellis_edit.utils.voxel_mesh_converter import (
+    load_coords_from_file,
+    save_voxel_mesh,
+    voxel_mesh_glb_transform_payload,
+)
 
 
 DEFAULT_GT_ROOT = Path("/home/wangxinxing/code/Edit3Dpp/data")
 DEFAULT_PRED_ROOT = Path("/cache/wangxinxing/data/temp")
-DEFAULT_METRICS = ["psnr", "ssim", "lpips", "fid", "dino_if", "chamfer", "clip_t"]
+DEFAULT_METRICS = [
+    "psnr",
+    "ssim",
+    "lpips",
+    "fid",
+    "dino_if_max",
+    "dino_if_mean",
+    "chamfer",
+    "clip_t",
+]
 DEFAULT_BATCH_INPUT_TEMPLATES = {
     "source_image": "{gt_root}/{dataset}/{object_name}/prompt_{prompt_id}/2d_render.png",
     "edit_image": "{gt_root}/{dataset}/{object_name}/prompt_{prompt_id}/2d_edit.png",
@@ -52,10 +73,175 @@ INPUT_KEYS = (
 )
 
 
+@dataclass(frozen=True)
+class PreparedCaseRun:
+    dataset: str
+    object_name: str
+    prompt_id: int
+    case_name: str
+    config_path: Path
+    log_path: Path
+    expected_glb: Path
+    final_glb: Path
+    case_output_dir: Path
+    source_voxels_path: Path | None
+
+
+SS_ARTIFACT_FILENAMES = (
+    "coords.ply",
+    "voxel_mesh.glb",
+    "voxel_mesh_transform.json",
+    "ss_metadata.json",
+)
+
+
+def _default_gpu_ids(*, fallback_device: str) -> list[str]:
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible_devices:
+        gpu_list = [item.strip() for item in visible_devices.split(",") if item.strip()]
+        if gpu_list:
+            return gpu_list
+
+    if fallback_device.startswith("cuda:"):
+        try:
+            import torch
+
+            device_count = int(torch.cuda.device_count())
+        except Exception:
+            device_count = 0
+        if device_count > 0:
+            return [str(index) for index in range(device_count)]
+        return [fallback_device.split(":", 1)[1]]
+    return []
+
+
+def parse_gpu_list(gpus_value: Any, *, fallback_device: str) -> list[str]:
+    if gpus_value in (None, ""):
+        return _default_gpu_ids(fallback_device=fallback_device)
+    if isinstance(gpus_value, str):
+        gpu_list = [item.strip() for item in gpus_value.split(",") if item.strip()]
+    elif isinstance(gpus_value, (list, tuple)):
+        gpu_list = [str(item).strip() for item in gpus_value if str(item).strip()]
+    else:
+        raise RuntimeError("batch.gpus must be a comma-separated string or list.")
+    if not gpu_list:
+        raise RuntimeError("GPU list is empty after parsing.")
+    return gpu_list
+
+
 def load_edit3d_metadata(gt_root: Path) -> list[dict[str, Any]]:
     metadata_path = gt_root / "metadata.json"
     with open(metadata_path, "r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def parse_case_id(case_id_text: str) -> tuple[str, str, int]:
+    raw_text = str(case_id_text or "").strip().strip("/")
+    parts = [part.strip() for part in raw_text.split("/") if part.strip()]
+    if len(parts) < 3:
+        raise RuntimeError(
+            f"Invalid case id '{case_id_text}'. Expected '<dataset>/<object_name>/prompt_<id>'."
+        )
+    dataset = parts[0]
+    prompt_name = parts[-1]
+    object_name = "/".join(parts[1:-1]).strip()
+    if not dataset or not object_name or not prompt_name.startswith("prompt_"):
+        raise RuntimeError(
+            f"Invalid case id '{case_id_text}'. Expected '<dataset>/<object_name>/prompt_<id>'."
+        )
+    try:
+        prompt_id = int(prompt_name.rsplit("_", 1)[-1])
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Invalid case id '{case_id_text}'. Prompt suffix must be an integer."
+        ) from exc
+    return dataset, object_name, prompt_id
+
+
+def _normalize_case_spec(case_spec: Any) -> tuple[str, str, int]:
+    if isinstance(case_spec, str):
+        return parse_case_id(case_spec)
+    if not isinstance(case_spec, dict):
+        raise RuntimeError(
+            "Selected case entries must be strings like "
+            "'GSO/Dog/prompt_1' or mappings with dataset/object_name/prompt_id."
+        )
+    if case_spec.get("case_id"):
+        return parse_case_id(str(case_spec["case_id"]))
+    dataset = str(case_spec.get("dataset") or "").strip()
+    object_name = str(
+        case_spec.get("object_name")
+        or case_spec.get("source_model")
+        or ""
+    ).strip()
+    prompt_id_raw = case_spec.get("prompt_id")
+    if not dataset or not object_name or prompt_id_raw is None:
+        raise RuntimeError(
+            "Selected case mappings must contain either 'case_id' or "
+            "'dataset', 'object_name', and 'prompt_id'."
+        )
+    try:
+        prompt_id = int(prompt_id_raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"Invalid prompt_id in selected case: {prompt_id_raw!r}") from exc
+    return dataset, object_name, prompt_id
+
+
+def _load_selected_case_specs(case_file: Path) -> list[Any]:
+    if not case_file.exists():
+        raise RuntimeError(f"Selected cases file not found: {case_file}")
+    payload = yaml.safe_load(case_file.read_text(encoding="utf-8"))
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("cases", "selected_cases"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+    raise RuntimeError(
+        f"Selected cases file must be a YAML list or mapping with 'cases': {case_file}"
+    )
+
+
+def resolve_selected_cases(
+    *,
+    inline_cases: Any,
+    case_file_value: Any,
+    config_dir: Path,
+) -> list[tuple[str, str, int]]:
+    raw_specs: list[Any] = []
+    if inline_cases is not None:
+        if not isinstance(inline_cases, list):
+            raise RuntimeError("batch.selected_cases must be a YAML list.")
+        raw_specs.extend(inline_cases)
+    if case_file_value:
+        case_file = Path(str(case_file_value)).expanduser()
+        if not case_file.is_absolute():
+            case_file = (config_dir / case_file).resolve()
+        raw_specs.extend(_load_selected_case_specs(case_file))
+
+    resolved: list[tuple[str, str, int]] = []
+    seen: set[tuple[str, str, int]] = set()
+    for raw_spec in raw_specs:
+        case_tuple = _normalize_case_spec(raw_spec)
+        if case_tuple in seen:
+            continue
+        seen.add(case_tuple)
+        resolved.append(case_tuple)
+    return resolved
+
+
+def available_prompt_cases(metadata: list[dict[str, Any]]) -> set[tuple[str, str, int]]:
+    cases: set[tuple[str, str, int]] = set()
+    for entry in metadata:
+        dataset = str(entry.get("dataset") or "").strip()
+        object_name = str(entry.get("source_model") or "").strip()
+        if not dataset or not object_name:
+            continue
+        for candidate_prompt_id in (1, 2, 3):
+            if entry.get(f"prompt_{candidate_prompt_id}"):
+                cases.add((dataset, object_name, candidate_prompt_id))
+    return cases
 
 
 def run_command(
@@ -93,6 +279,22 @@ def format_time(seconds: float) -> str:
     return f"{secs}s"
 
 
+def estimate_remaining_time(*, elapsed_seconds: float, finished_cases: int, total_cases: int) -> str:
+    if finished_cases <= 0:
+        return "estimating"
+    remaining_cases = max(total_cases - finished_cases, 0)
+    if remaining_cases == 0:
+        return "0s"
+    throughput = finished_cases / max(elapsed_seconds, 1e-6)
+    eta_seconds = remaining_cases / max(throughput, 1e-6)
+    return format_time(eta_seconds)
+
+
+def metrics_require_video(metrics: list[str]) -> bool:
+    requested = {metric.strip().lower() for metric in metrics}
+    return "fvd" in requested
+
+
 def case_identifier(dataset: str, object_name: str, prompt_id: int) -> str:
     safe_object_name = object_name.replace("/", "_").replace(" ", "_")
     return f"{dataset}__{safe_object_name}__prompt_{prompt_id}"
@@ -127,6 +329,13 @@ def stage_output_dir_name(entrypoint_name: str) -> str:
             f"Batch evaluation requires an entrypoint that produces final GLB outputs; '{entrypoint_name}' is ss-only."
         )
     return "slat"
+
+
+def case_output_method_name(*, runtime: dict[str, Any], entrypoint_name: str) -> str:
+    output_group = runtime.get("output_group")
+    if isinstance(output_group, str) and output_group.strip():
+        return output_group.strip()
+    return entrypoint_name
 
 
 def build_case_config(
@@ -204,12 +413,68 @@ def build_case_config(
         resolved_inputs[key] = coerce_existing_file(resolve_template_value(template_value, variables))
     config["inputs"] = resolved_inputs
 
-    layout = build_experiment_output_layout(entrypoint_name, case_name, outputs_root=work_root)
+    layout = build_experiment_output_layout(
+        case_output_method_name(runtime=runtime, entrypoint_name=entrypoint_name),
+        case_name,
+        outputs_root=work_root,
+    )
     expected_glb = layout.edit_dir / stage_output_dir_name(entrypoint_name) / "sample_00.glb"
     return config, case_name, expected_glb
 
 
-def render_all_results(output_root: Path, device: str = "cuda:0") -> bool:
+def recover_existing_glb(*, expected_glb: Path, final_glb: Path) -> bool:
+    if not expected_glb.is_file():
+        return False
+    ensure_dir(final_glb.parent)
+    shutil.copy2(expected_glb, final_glb)
+    print(f"[RECOVER] 使用已有单 case GLB: {final_glb}")
+    return True
+
+
+def copy_ss_artifacts(
+    *,
+    case_output_dir: Path,
+    final_case_dir: Path,
+) -> list[Path]:
+    ss_source_dir = case_output_dir / "edit" / "ss"
+    if not ss_source_dir.is_dir():
+        return []
+
+    copied: list[Path] = []
+    ss_target_dir = ensure_dir(final_case_dir / "ss")
+    for filename in SS_ARTIFACT_FILENAMES:
+        source_path = ss_source_dir / filename
+        if not source_path.is_file():
+            continue
+        target_path = ss_target_dir / filename
+        shutil.copy2(source_path, target_path)
+        copied.append(target_path)
+    return copied
+
+
+def copy_source_voxelmesh_artifacts(
+    *,
+    source_voxels_path: Path | None,
+    final_case_dir: Path,
+) -> list[Path]:
+    if source_voxels_path is None or not source_voxels_path.is_file():
+        return []
+
+    coords = load_coords_from_file(source_voxels_path, device="cpu")
+    source_target_dir = ensure_dir(final_case_dir / "source_voxelmesh")
+    voxel_mesh_path = source_target_dir / "voxel_mesh.glb"
+    transform_path = source_target_dir / "voxel_mesh_transform.json"
+    save_voxel_mesh(coords, voxel_mesh_path, resolution=64)
+    write_json(transform_path, voxel_mesh_glb_transform_payload())
+    return [voxel_mesh_path, transform_path]
+
+
+def render_all_results(
+    output_root: Path,
+    *,
+    gpu_ids: list[str],
+    metrics: list[str],
+) -> bool:
     render_dir = Path("VoxHammer/Edit3D-Bench")
     if not render_dir.exists():
         render_dir = Path("../VoxHammer/Edit3D-Bench")
@@ -217,17 +482,73 @@ def render_all_results(output_root: Path, device: str = "cuda:0") -> bool:
         print("[ERROR] 找不到渲染脚本")
         return False
 
-    env = os.environ.copy()
-    if device.startswith("cuda:"):
-        env["CUDA_VISIBLE_DEVICES"] = device.replace("cuda:", "")
+    if not gpu_ids:
+        raise RuntimeError("Render stage requires at least one GPU id.")
 
-    cmd = [sys.executable, "render.py", "--base_dir", str(output_root.resolve())]
-    returncode, stdout, stderr = run_command(cmd, cwd=render_dir, env=env, timeout=7200)
-    if stdout:
-        print(stdout)
-    if stderr:
-        print(f"[STDERR] {stderr}")
-    return returncode == 0
+    skip_video = not metrics_require_video(metrics)
+    render_logs_dir = ensure_dir(output_root / "_render_logs")
+    processes: list[tuple[str, subprocess.Popen[str], Any, Path]] = []
+    shard_count = len(gpu_ids)
+
+    print(
+        f"[Render] Using {shard_count} GPU shard(s): "
+        + ", ".join(f"cuda:{gpu_id}" for gpu_id in gpu_ids)
+    )
+    print(f"[Render] Skip video: {'yes' if skip_video else 'no'}")
+
+    for shard_id, gpu_id in enumerate(gpu_ids):
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = gpu_id
+        env.setdefault("PYTHONUNBUFFERED", "1")
+
+        cmd = [
+            sys.executable,
+            "render.py",
+            "--base_dir",
+            str(output_root.resolve()),
+            "--num_shards",
+            str(shard_count),
+            "--shard_id",
+            str(shard_id),
+            "--quiet_blender",
+            "--skip_existing",
+        ]
+        if skip_video:
+            cmd.append("--skip_video")
+
+        log_path = render_logs_dir / f"render_shard_{shard_id}.log"
+        log_handle = open(log_path, "w", encoding="utf-8")
+        process = subprocess.Popen(
+            cmd,
+            cwd=render_dir,
+            env=env,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        processes.append((gpu_id, process, log_handle, log_path))
+        print(f"[Render] Launch shard {shard_id + 1}/{shard_count} on cuda:{gpu_id} -> {log_path}")
+
+    success = True
+    for gpu_id, process, log_handle, log_path in processes:
+        returncode = process.wait(timeout=7200)
+        log_handle.close()
+        if returncode != 0:
+            print(f"[Render] Shard on cuda:{gpu_id} failed -> {log_path}")
+            success = False
+            continue
+
+        tail = ""
+        try:
+            lines = log_path.read_text(encoding="utf-8").splitlines()
+            tail = "\n".join(lines[-4:])
+        except Exception:
+            tail = ""
+        print(f"[Render] Shard on cuda:{gpu_id} finished")
+        if tail:
+            print(tail)
+
+    return success
 
 
 def run_evaluation(
@@ -281,60 +602,42 @@ def save_results(
     output_root: Path,
     entrypoint_name: str,
     config_name: str,
+    run_group: str | None,
+    gt_root: Path,
+    cases: list[tuple[str, str, int]],
+    requested_metrics: list[str],
+    benchmark_root: Path,
+    skip_benchmark_render: bool,
     results: dict[str, Any] | None,
     total_time: float,
 ) -> None:
-    print("\n[4/4] 保存结果...")
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir = Path("outputs/results") / f"{entrypoint_name}_{config_name}_{timestamp}"
-    ensure_dir(results_dir)
+    if results is None:
+        return
 
-    full_results = {
-        "entrypoint": entrypoint_name,
-        "config_name": config_name,
-        "timestamp": timestamp,
-        "datetime": datetime.now().isoformat(),
-        "total_time_seconds": total_time,
-        "total_time_formatted": format_time(total_time),
-        "output_root": str(output_root),
-        "evaluation_results": results,
-    }
-    with open(results_dir / "evaluation_results.json", "w", encoding="utf-8") as handle:
-        json.dump(full_results, handle, indent=2, ensure_ascii=False)
+    print("\n[4/4] 保存 benchmark daily 结果...")
+    bundle_root = create_daily_benchmark_bundle(
+        benchmark_root=benchmark_root,
+        entrypoint_name=entrypoint_name,
+        config_name=config_name,
+        run_group=run_group,
+        gt_root=gt_root,
+        pred_root=output_root,
+        cases=cases,
+        requested_metrics=requested_metrics,
+        summary_results=results,
+        total_time_seconds=total_time,
+        skip_benchmark_render=skip_benchmark_render,
+    )
+    daily_index = build_daily_index(benchmark_root)
+    focus_index = build_focus_index(benchmark_root)
 
-    report_file = results_dir / "report.txt"
-    with open(report_file, "w", encoding="utf-8") as handle:
-        handle.write("=" * 80 + "\n")
-        handle.write("Edit3D-Bench 评测报告\n")
-        handle.write("=" * 80 + "\n\n")
-        handle.write(f"Entrypoint: {entrypoint_name}\n")
-        handle.write(f"配置: {config_name}\n")
-        handle.write(f"评测时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        handle.write(f"总耗时: {format_time(total_time)}\n")
-        handle.write(f"数据位置: {output_root}\n\n")
-
-        if results and "results" in results:
-            handle.write("=" * 80 + "\n")
-            handle.write("评测指标结果\n")
-            handle.write("=" * 80 + "\n\n")
-            for metric, values in results["results"].items():
-                handle.write(f"{metric.upper()}:\n")
-                if isinstance(values, dict):
-                    if values.get("mean") is not None:
-                        handle.write(f"  均值: {values['mean']:.4f}\n")
-                    if values.get("std") is not None:
-                        handle.write(f"  标准差: {values['std']:.4f}\n")
-                    if values.get("count") is not None:
-                        handle.write(f"  样本数: {values['count']}\n")
-                elif values is not None:
-                    handle.write(f"  值: {values:.4f}\n")
-                else:
-                    handle.write("  值: N/A\n")
-                handle.write("\n")
-
-    print(f"[INFO] 结果已保存到: {results_dir}")
-    print(f"[INFO] - 报告: {report_file}")
-    print(f"[INFO] - 数据: {output_root}")
+    print(f"[INFO] daily 结果已保存到: {bundle_root}")
+    print(f"[INFO] - 总览页面: {bundle_root / 'index.html'}")
+    if daily_index is not None:
+        print(f"[INFO] - daily 集合页: {daily_index}")
+    if focus_index is not None:
+        print(f"[INFO] - focus 总览: {focus_index}")
+    print(f"[INFO] - 原始评测数据: {output_root}")
 
 
 def run_single_edit(
@@ -374,6 +677,20 @@ def run_single_edit(
         seed_override=seed_override,
         device_override=device_override,
     )
+    case_output_dir = expected_glb.parents[2]
+    source_voxels_text = case_config.get("inputs", {}).get("source_voxels")
+    source_voxels_path = Path(source_voxels_text) if source_voxels_text else None
+
+    if skip_exists and recover_existing_glb(expected_glb=expected_glb, final_glb=final_glb):
+        copy_ss_artifacts(
+            case_output_dir=case_output_dir,
+            final_case_dir=prompt_eval_dir,
+        )
+        copy_source_voxelmesh_artifacts(
+            source_voxels_path=source_voxels_path,
+            final_case_dir=prompt_eval_dir,
+        )
+        return True, True
 
     config_dir = ensure_dir(pred_root / "_batch_configs")
     config_path = config_dir / f"{case_name}.yaml"
@@ -387,7 +704,6 @@ def run_single_edit(
         print(config_path.read_text(encoding="utf-8"))
         return True, False
 
-    case_output_dir = expected_glb.parents[2]
     if case_output_dir.exists() and not skip_exists:
         shutil.rmtree(case_output_dir)
 
@@ -412,10 +728,281 @@ def run_single_edit(
 
     shutil.copy2(expected_glb, final_glb)
     print(f"[SUCCESS] GLB 已保存: {final_glb}")
+    copied_ss_artifacts = copy_ss_artifacts(
+        case_output_dir=case_output_dir,
+        final_case_dir=prompt_eval_dir,
+    )
+    copy_source_voxelmesh_artifacts(
+        source_voxels_path=source_voxels_path,
+        final_case_dir=prompt_eval_dir,
+    )
+    if copied_ss_artifacts:
+        print(f"[SUCCESS] 已保留 SS artifacts: {len(copied_ss_artifacts)} 个")
     if not keep_case_outputs and case_output_dir.exists():
         shutil.rmtree(case_output_dir)
         print(f"[CLEANUP] 已删除单 case 完整输出: {case_output_dir}")
     return True, False
+
+
+def prepare_case_run(
+    *,
+    gt_root: Path,
+    pred_root: Path,
+    entrypoint_name: str,
+    dataset: str,
+    object_name: str,
+    prompt_id: int,
+    base_config: dict[str, Any],
+    assets_root: Path | None,
+    skip_exists: bool,
+    model_override: str | None,
+    seed_override: int | None,
+    device_override: str | None,
+) -> tuple[PreparedCaseRun | None, bool]:
+    prompt_eval_dir = pred_root / dataset / object_name / f"prompt_{prompt_id}"
+    ensure_dir(prompt_eval_dir)
+    final_glb = prompt_eval_dir / "edit.glb"
+    if skip_exists and final_glb.exists():
+        print(f"[SKIP] edit.glb 已存在: {final_glb}")
+        return None, True
+
+    case_config, case_name, expected_glb = build_case_config(
+        base_config=base_config,
+        entrypoint_name=entrypoint_name,
+        gt_root=gt_root,
+        pred_root=pred_root,
+        assets_root=assets_root,
+        dataset=dataset,
+        object_name=object_name,
+        prompt_id=prompt_id,
+        model_override=model_override,
+        seed_override=seed_override,
+        device_override=device_override,
+    )
+    case_output_dir = expected_glb.parents[2]
+    source_voxels_text = case_config.get("inputs", {}).get("source_voxels")
+    source_voxels_path = Path(source_voxels_text) if source_voxels_text else None
+
+    if skip_exists and recover_existing_glb(expected_glb=expected_glb, final_glb=final_glb):
+        copy_ss_artifacts(
+            case_output_dir=case_output_dir,
+            final_case_dir=prompt_eval_dir,
+        )
+        copy_source_voxelmesh_artifacts(
+            source_voxels_path=source_voxels_path,
+            final_case_dir=prompt_eval_dir,
+        )
+        return None, True
+
+    config_dir = ensure_dir(pred_root / "_batch_configs")
+    config_path = config_dir / f"{case_name}.yaml"
+    config_path.write_text(
+        yaml.safe_dump(case_config, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+    if case_output_dir.exists() and not skip_exists:
+        shutil.rmtree(case_output_dir)
+
+    log_dir = ensure_dir(pred_root / "_batch_logs")
+    log_path = log_dir / f"{case_name}.log"
+    return (
+        PreparedCaseRun(
+            dataset=dataset,
+            object_name=object_name,
+            prompt_id=prompt_id,
+            case_name=case_name,
+            config_path=config_path,
+            log_path=log_path,
+            expected_glb=expected_glb,
+            final_glb=final_glb,
+            case_output_dir=case_output_dir,
+            source_voxels_path=source_voxels_path,
+        ),
+        False,
+    )
+
+
+def run_editing_jobs_parallel(
+    *,
+    gt_root: Path,
+    pred_root: Path,
+    entrypoint_name: str,
+    base_config: dict[str, Any],
+    cases: list[tuple[str, str, int]],
+    assets_root: Path | None,
+    gpu_ids: list[str],
+    skip_exists: bool,
+    keep_case_outputs: bool,
+    model_override: str | None,
+    seed_override: int | None,
+    dry_run: bool,
+) -> tuple[int, int, int]:
+    if not gpu_ids:
+        raise RuntimeError("At least one GPU id is required for batch editing.")
+
+    if dry_run:
+        dataset, object_name, prompt_id = cases[0]
+        success, _ = run_single_edit(
+            gt_root=gt_root,
+            pred_root=pred_root,
+            entrypoint_name=entrypoint_name,
+            dataset=dataset,
+            object_name=object_name,
+            prompt_id=prompt_id,
+            base_config=base_config,
+            assets_root=assets_root,
+            skip_exists=skip_exists,
+            keep_case_outputs=keep_case_outputs,
+            model_override=model_override,
+            seed_override=seed_override,
+            device_override="cuda:0",
+            dry_run=True,
+        )
+        return (1 if success else 0), 0, 0
+
+    pending_jobs: list[PreparedCaseRun] = []
+    skip_count = 0
+    for dataset, object_name, prompt_id in cases:
+        prepared, skipped = prepare_case_run(
+            gt_root=gt_root,
+            pred_root=pred_root,
+            entrypoint_name=entrypoint_name,
+            dataset=dataset,
+            object_name=object_name,
+            prompt_id=prompt_id,
+            base_config=base_config,
+            assets_root=assets_root,
+            skip_exists=skip_exists,
+            model_override=model_override,
+            seed_override=seed_override,
+            device_override="cuda:0",
+        )
+        if skipped:
+            skip_count += 1
+            continue
+        if prepared is not None:
+            pending_jobs.append(prepared)
+
+    if not pending_jobs:
+        return 0, skip_count, 0
+
+    total_cases = len(cases)
+    finished_cases = skip_count
+    success_count = 0
+    failure_count = 0
+    gpu_pool = list(gpu_ids)
+    running: list[dict[str, Any]] = []
+    start_time = time.time()
+    last_status_time = 0.0
+
+    while pending_jobs or running:
+        while pending_jobs and gpu_pool:
+            job = pending_jobs.pop(0)
+            gpu_id = gpu_pool.pop(0)
+            env = os.environ.copy()
+            env["CUDA_VISIBLE_DEVICES"] = gpu_id
+            env.setdefault("PYTHONUNBUFFERED", "1")
+            log_handle = open(job.log_path, "w", encoding="utf-8")
+            cmd = [sys.executable, "run_edit_experiment.py", "--config", str(job.config_path)]
+            process = subprocess.Popen(
+                cmd,
+                cwd=Path(__file__).resolve().parent,
+                env=env,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+            )
+            running.append(
+                {
+                    "job": job,
+                    "gpu_id": gpu_id,
+                    "process": process,
+                    "log_handle": log_handle,
+                    "start_time": time.time(),
+                }
+            )
+            elapsed = time.time() - start_time
+            eta = estimate_remaining_time(
+                elapsed_seconds=elapsed,
+                finished_cases=finished_cases,
+                total_cases=total_cases,
+            )
+            print(
+                f"[LAUNCH] {job.case_name} -> cuda:{gpu_id} | "
+                f"running={len(running)} pending={len(pending_jobs)} | ETA {eta}"
+            )
+
+        if not running:
+            continue
+
+        time.sleep(5.0)
+        now = time.time()
+        still_running: list[dict[str, Any]] = []
+        for item in running:
+            returncode = item["process"].poll()
+            if returncode is None:
+                still_running.append(item)
+                continue
+
+            item["log_handle"].close()
+            gpu_pool.append(item["gpu_id"])
+            gpu_pool.sort(key=int)
+            finished_cases += 1
+            job = item["job"]
+            duration = now - item["start_time"]
+
+            if returncode == 0 and job.expected_glb.is_file():
+                shutil.copy2(job.expected_glb, job.final_glb)
+                copy_ss_artifacts(
+                    case_output_dir=job.case_output_dir,
+                    final_case_dir=job.final_glb.parent,
+                )
+                copy_source_voxelmesh_artifacts(
+                    source_voxels_path=job.source_voxels_path,
+                    final_case_dir=job.final_glb.parent,
+                )
+                if not keep_case_outputs and job.case_output_dir.exists():
+                    shutil.rmtree(job.case_output_dir)
+                success_count += 1
+                state = "SUCCESS"
+            else:
+                failure_count += 1
+                state = "FAIL"
+
+            elapsed = now - start_time
+            eta = estimate_remaining_time(
+                elapsed_seconds=elapsed,
+                finished_cases=finished_cases,
+                total_cases=total_cases,
+            )
+            print(
+                f"[{state}] {job.case_name} | gpu=cuda:{item['gpu_id']} | "
+                f"case_time={format_time(duration)} | "
+                f"done={finished_cases}/{total_cases} success={success_count} "
+                f"failed={failure_count} skipped={skip_count} | "
+                f"running={len(still_running)} pending={len(pending_jobs)} | "
+                f"elapsed={format_time(elapsed)} ETA={eta}"
+            )
+            if state == "FAIL":
+                print(f"[FAIL] 日志: {job.log_path}")
+
+        running = still_running
+        if running and now - last_status_time >= 60.0:
+            elapsed = now - start_time
+            eta = estimate_remaining_time(
+                elapsed_seconds=elapsed,
+                finished_cases=finished_cases,
+                total_cases=total_cases,
+            )
+            print(
+                f"[STATUS] done={finished_cases}/{total_cases} success={success_count} "
+                f"failed={failure_count} skipped={skip_count} | "
+                f"running={len(running)} pending={len(pending_jobs)} | "
+                f"elapsed={format_time(elapsed)} ETA={eta}"
+            )
+            last_status_time = now
+
+    return success_count, skip_count, failure_count
 
 
 def run_editing_and_eval(
@@ -429,6 +1016,7 @@ def run_editing_and_eval(
     assets_root: Path | None,
     metrics: list[str],
     device: str,
+    gpu_ids: list[str],
     skip_benchmark_render: bool,
     skip_exists: bool,
     keep_case_outputs: bool,
@@ -446,49 +1034,42 @@ def run_editing_and_eval(
     print(f"Entrypoint: {entrypoint_name}")
     print(f"配置: {config_name}")
     print(f"案例数量: {len(cases)}")
+    print(f"编辑使用 GPU: {', '.join(f'cuda:{gpu_id}' for gpu_id in gpu_ids)}")
     print(f"跳过已存在: {'是' if skip_exists else '否'}")
     print(f"保留单 case 输出: {'是' if keep_case_outputs else '否'}")
     print("=" * 80)
 
-    success_count = 0
-    skip_count = 0
     print("\n" + "=" * 80)
     print("步骤 1/4: 批量运行 composable 编辑实验")
     print("=" * 80)
-
-    for index, (dataset, object_name, prompt_id) in enumerate(cases, start=1):
-        print(f"\n[{index}/{len(cases)}] 处理: {dataset}/{object_name}/prompt_{prompt_id}")
-        success, skipped = run_single_edit(
-            gt_root=gt_root,
-            pred_root=pred_root,
-            entrypoint_name=entrypoint_name,
-            dataset=dataset,
-            object_name=object_name,
-            prompt_id=prompt_id,
-            base_config=base_config,
-            assets_root=assets_root,
-            skip_exists=skip_exists,
-            keep_case_outputs=keep_case_outputs,
-            model_override=model_override,
-            seed_override=seed_override,
-            device_override=device,
-            dry_run=dry_run,
-        )
-        if not success:
-            continue
-        success_count += 1
-        if skipped:
-            skip_count += 1
-        if dry_run:
-            print("[DRY-RUN] 仅展示首个 case 的解析配置，提前结束。")
-            return True, None
+    success_count, skip_count, failure_count = run_editing_jobs_parallel(
+        gt_root=gt_root,
+        pred_root=pred_root,
+        entrypoint_name=entrypoint_name,
+        base_config=base_config,
+        cases=cases,
+        assets_root=assets_root,
+        gpu_ids=gpu_ids,
+        skip_exists=skip_exists,
+        keep_case_outputs=keep_case_outputs,
+        model_override=model_override,
+        seed_override=seed_override,
+        dry_run=dry_run,
+    )
+    if dry_run:
+        print("[DRY-RUN] 仅展示首个 case 的解析配置，提前结束。")
+        return True, None
 
     print(f"\n[INFO] 编辑完成: {success_count}/{len(cases)} 成功")
     if skip_count > 0:
         print(f"[INFO] 跳过已存在: {skip_count} 个")
-    if success_count == 0:
+    if failure_count > 0:
+        print(f"[WARNING] 失败案例: {failure_count} 个")
+    if success_count == 0 and skip_count == 0:
         print("[ERROR] 没有成功的编辑结果")
         return False, None
+    if success_count == 0 and skip_count > 0:
+        print("[INFO] 没有新生成结果，使用已存在的 edit.glb 继续后续渲染与评测")
 
     if skip_benchmark_render:
         print("\n[INFO] 跳过 Edit3D-Bench 渲染步骤")
@@ -496,7 +1077,11 @@ def run_editing_and_eval(
         print("\n" + "=" * 80)
         print("步骤 2/4: 统一渲染所有结果")
         print("=" * 80)
-        render_success = render_all_results(pred_root, device)
+        render_success = render_all_results(
+            pred_root,
+            gpu_ids=gpu_ids,
+            metrics=metrics,
+        )
         if not render_success:
             print("[WARNING] 渲染失败")
 
@@ -535,8 +1120,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", type=str, help="覆盖 runtime.model")
     parser.add_argument("--seed", type=int, help="覆盖 runtime.seed")
     parser.add_argument("--device", type=str, help="覆盖 runtime.device 和评测 device")
+    parser.add_argument("--gpus", type=str, help="编辑阶段使用的 GPU 列表，例如 '1,2'")
+    parser.add_argument("--group", type=str, help="写入 daily/focus 的运行分组名")
     parser.add_argument("--metrics", nargs="+", help="覆盖评测指标")
     parser.add_argument("--skip-render", action="store_true", help="跳过 Edit3D-Bench 渲染步骤")
+    parser.add_argument("--benchmark-root", type=str, help="benchmark daily/focus 根目录")
     skip_exists_group = parser.add_mutually_exclusive_group()
     skip_exists_group.add_argument("--skip-exists", dest="skip_exists", action="store_true", help="跳过已存在的 edit.glb")
     skip_exists_group.add_argument(
@@ -570,11 +1158,13 @@ def main() -> int:
 
     config_data: dict[str, Any] = {}
     batch_config: dict[str, Any] = {}
+    config_dir = Path.cwd()
     if args.config:
         config_path = Path(args.config)
         if not config_path.exists():
             print(f"[ERROR] 配置文件不存在: {config_path}")
             return 1
+        config_dir = config_path.expanduser().resolve().parent
         with open(config_path, "r", encoding="utf-8") as handle:
             config_data = yaml.safe_load(handle) or {}
         if not isinstance(config_data, dict):
@@ -598,6 +1188,7 @@ def main() -> int:
 
     gt_root = Path(args.gt_root or batch_config.get("gt_root") or DEFAULT_GT_ROOT).expanduser().resolve()
     config_name = args.config_name or batch_config.get("config_name") or entrypoint_name
+    run_group = args.group or batch_config.get("group")
     dataset = args.dataset or batch_config.get("dataset")
     object_name = args.object or batch_config.get("object")
     prompt_id = args.prompt_id or batch_config.get("prompt_id")
@@ -608,8 +1199,11 @@ def main() -> int:
     pred_root = Path(pred_root_text).expanduser().resolve() if pred_root_text else (
         DEFAULT_PRED_ROOT / f"{entrypoint_name}_{config_name}"
     ).resolve()
+    benchmark_root_text = args.benchmark_root or batch_config.get("benchmark_root")
+    benchmark_root = Path(benchmark_root_text).expanduser().resolve() if benchmark_root_text else DEFAULT_BENCHMARK_ROOT
     metrics = args.metrics or batch_config.get("metrics") or DEFAULT_METRICS
     device = args.device or config_data.get("runtime", {}).get("device") or batch_config.get("device") or "cuda:0"
+    gpu_ids = parse_gpu_list(args.gpus or batch_config.get("gpus"), fallback_device=device)
     skip_benchmark_render = args.skip_render or bool(batch_config.get("skip_benchmark_render", False))
     skip_exists = args.skip_exists
     if skip_exists is None:
@@ -617,6 +1211,11 @@ def main() -> int:
     keep_case_outputs = args.keep_case_outputs
     if keep_case_outputs is None:
         keep_case_outputs = bool(batch_config.get("keep_case_outputs", False))
+    selected_cases = resolve_selected_cases(
+        inline_cases=batch_config.get("selected_cases"),
+        case_file_value=batch_config.get("selected_cases_file"),
+        config_dir=config_dir,
+    )
 
     if not gt_root.exists():
         print(f"[ERROR] GT 数据根目录不存在: {gt_root}")
@@ -633,8 +1232,11 @@ def main() -> int:
     print("=" * 80)
     print(f"Entrypoint: {entrypoint_name}")
     print(f"配置: {config_name}")
+    if run_group:
+        print(f"运行分组: {run_group}")
     print(f"GT 数据: {gt_root}")
     print(f"预测输出: {pred_root}")
+    print(f"benchmark 根目录: {benchmark_root}")
     if assets_root is not None:
         print(f"源资产: {assets_root}")
     if dataset:
@@ -646,25 +1248,45 @@ def main() -> int:
     if max_cases:
         print(f"案例限制: {max_cases}")
     print(f"评测指标: {metrics}")
+    print(f"编辑 GPU 池: {', '.join(f'cuda:{gpu_id}' for gpu_id in gpu_ids)}")
+    print(f"评测 GPU: {device}")
     print("=" * 80)
 
     metadata = load_edit3d_metadata(gt_root)
-    cases: list[tuple[str, str, int]] = []
-    for entry in metadata:
-        entry_dataset = entry.get("dataset")
-        entry_object_name = entry.get("source_model")
-        if not entry_dataset or not entry_object_name:
-            continue
-        if dataset and entry_dataset != dataset:
-            continue
-        if object_name and entry_object_name != object_name:
-            continue
-        for candidate_prompt_id in (1, 2, 3):
-            if prompt_id and candidate_prompt_id != prompt_id:
+    if selected_cases:
+        known_cases = available_prompt_cases(metadata)
+        missing_cases = [case for case in selected_cases if case not in known_cases]
+        if missing_cases:
+            formatted = ", ".join(
+                f"{dataset}/{object_name}/prompt_{prompt_id}"
+                for dataset, object_name, prompt_id in missing_cases
+            )
+            raise RuntimeError(f"Unknown or unavailable selected cases: {formatted}")
+        cases = list(selected_cases)
+        if dataset:
+            cases = [case for case in cases if case[0] == dataset]
+        if object_name:
+            cases = [case for case in cases if case[1] == object_name]
+        if prompt_id:
+            cases = [case for case in cases if case[2] == prompt_id]
+        print(f"显式案例集: {len(selected_cases)} 个")
+    else:
+        cases = []
+        for entry in metadata:
+            entry_dataset = entry.get("dataset")
+            entry_object_name = entry.get("source_model")
+            if not entry_dataset or not entry_object_name:
                 continue
-            prompt_key = f"prompt_{candidate_prompt_id}"
-            if entry.get(prompt_key):
-                cases.append((entry_dataset, entry_object_name, candidate_prompt_id))
+            if dataset and entry_dataset != dataset:
+                continue
+            if object_name and entry_object_name != object_name:
+                continue
+            for candidate_prompt_id in (1, 2, 3):
+                if prompt_id and candidate_prompt_id != prompt_id:
+                    continue
+                prompt_key = f"prompt_{candidate_prompt_id}"
+                if entry.get(prompt_key):
+                    cases.append((entry_dataset, entry_object_name, candidate_prompt_id))
 
     if max_cases:
         cases = cases[: int(max_cases)]
@@ -674,6 +1296,22 @@ def main() -> int:
         return 1
 
     ensure_dir(pred_root)
+    (pred_root / "_batch_selected_cases.json").write_text(
+        json.dumps(
+            [
+                {
+                    "dataset": dataset_name,
+                    "object_name": object_name_text,
+                    "prompt_id": prompt_id_value,
+                    "case_id": f"{dataset_name}/{object_name_text}/prompt_{prompt_id_value}",
+                }
+                for dataset_name, object_name_text, prompt_id_value in cases
+            ],
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     (pred_root / "_batch_source_config.yaml").write_text(
         yaml.safe_dump(config_data or {"entrypoint": entrypoint_name, "batch": batch_config}, sort_keys=False, allow_unicode=True),
         encoding="utf-8",
@@ -695,6 +1333,7 @@ def main() -> int:
         keep_case_outputs=keep_case_outputs,
         model_override=model_override,
         seed_override=seed_override,
+        gpu_ids=gpu_ids,
         dry_run=args.dry_run,
     )
     if not success:
@@ -707,6 +1346,12 @@ def main() -> int:
             output_root=pred_root,
             entrypoint_name=entrypoint_name,
             config_name=config_name,
+            run_group=run_group,
+            gt_root=gt_root,
+            cases=cases,
+            requested_metrics=list(metrics),
+            benchmark_root=benchmark_root,
+            skip_benchmark_render=skip_benchmark_render,
             results=results,
             total_time=total_time,
         )

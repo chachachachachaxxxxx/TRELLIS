@@ -1,0 +1,115 @@
+# ============================================================
+# ablation3 / 方法 6: preprocess disabled crop
+# 基线同 ablation1_06，仅关闭 crop
+# ============================================================
+
+entrypoint: edit_full
+
+runtime:
+  case_name: ablation3_06_pre_no_crop
+  model: microsoft/TRELLIS-image-large
+  seed: 1
+  device: cuda:0
+  output_root: outputs
+  num_samples: 1
+  spconv_algo: native
+  skip_render: true
+  skip_glb: false
+  skip_ply: false
+  save_source_outputs: false
+
+inputs:
+  source_image: assets/edit_example/images/2d_render.png
+  edit_image: assets/edit_example/images/2d_edit.png
+  mask_image: assets/edit_example/images/2d_mask.png
+  mask_glb: assets/edit_example/mask.glb
+  source_voxels: assets/edit_example/voxels.ply
+  source_features: assets/edit_example/features.npz
+  edited_coords: ""
+
+preprocess:
+  style: shared
+  crop_policy: disabled
+  mask_policy: provided
+  adaptive_foreground_scale:
+    enabled: false
+    strategy: global_linear
+    probe_scales: [1.10, 1.35]
+    min_scale: 1.0
+    max_scale: 1.5
+    min_bbox_volume_delta: 0.02
+    fallback_scale: 1.2
+    linear_bbox_slope: -0.2524674839565567
+    linear_bbox_intercept: 0.6333178020685066
+
+ss:
+  sampler:
+    steps: 25
+  inversion:
+    enabled: true
+    denoise_init: inverted_terminal_noise
+    solver: simple
+    predictor_corrector_steps: 0
+  controls:
+    p2p:
+      enabled: false
+    kv_blend:
+      enabled: true
+      t_start: 1.0
+      t_end: 0.0
+      self_attention: true
+      cross_attention: true
+    latent_blend:
+      enabled: true
+      strength: 1.0
+      hard_mask_mode: edit_all
+    uniedit:
+      enabled: false
+  output:
+    output_format: both
+    save_voxel_mesh: true
+
+slat:
+  sampler:
+    steps: 25
+  inversion:
+    enabled: true
+    denoise_init: terminal_noise
+    solver: simple
+    predictor_corrector_steps: 0
+  controls:
+    p2p:
+      enabled: false
+    kv_blend:
+      enabled: true
+      t_start: 1.0
+      t_end: 0.0
+      self_attention: true
+      cross_attention: true
+    latent_blend:
+      enabled: true
+    uniedit:
+      enabled: false
+  decode:
+    skip_source_decode: true
+    modes: [gaussian, mesh]
+
+batch:
+  config_name: ablation3_06_pre_no_crop
+  group: ablation3
+  gt_root: /cache/wangxinxing/data/trellis_edit_benchmark/edit3d_data/data
+  assets_root: /cache/wangxinxing/data/trellis_edit_benchmark/edit3d_data/renders
+  pred_root: /cache/wangxinxing/data/temp/ablation3/06_pre_no_crop
+  max_cases: 12
+  metrics: [psnr, ssim, lpips, fid, dino_if_max, dino_if_mean, chamfer, clip_t]
+  skip_benchmark_render: false
+  skip_exists: false
+  keep_case_outputs: false
+  input_templates:
+    source_image: "{gt_root}/{dataset}/{object_name}/prompt_{prompt_id}/2d_render.png"
+    edit_image: "{gt_root}/{dataset}/{object_name}/prompt_{prompt_id}/2d_edit.png"
+    mask_image: "{gt_root}/{dataset}/{object_name}/prompt_{prompt_id}/2d_mask.png"
+    mask_glb: "{gt_root}/{dataset}/{object_name}/prompt_{prompt_id}/3d_edit_region.glb"
+    source_voxels: "{assets_root}/{dataset}/{object_name}/voxels.ply"
+    source_features: "{assets_root}/{dataset}/{object_name}/features.npz"
+    edited_coords: ""

@@ -1,0 +1,63 @@
+suite_name: ablation4
+default_script: run_batch_edit_and_eval.py
+
+jobs:
+  - name: ablation4_01_full_steps_baseline
+    base_config: edit_configs/ablation2/04_vox_style_full_source.yaml
+    overrides:
+      runtime.case_name: ablation4_01_full_steps_baseline
+      batch.config_name: ablation4_01_full_steps_baseline
+      batch.group: ablation4
+      batch.pred_root: /cache/wangxinxing/data/temp/ablation4/01_full_steps_baseline
+      ss.inversion.inversion_steps: 25
+      slat.inversion.inversion_steps: 25
+
+  - name: ablation4_02_ss15_slat25
+    base_config: edit_configs/ablation2/04_vox_style_full_source.yaml
+    overrides:
+      runtime.case_name: ablation4_02_ss15_slat25
+      batch.config_name: ablation4_02_ss15_slat25
+      batch.group: ablation4
+      batch.pred_root: /cache/wangxinxing/data/temp/ablation4/02_ss15_slat25
+      ss.inversion.inversion_steps: 15
+      slat.inversion.inversion_steps: 25
+
+  - name: ablation4_03_ss25_slat15
+    base_config: edit_configs/ablation2/04_vox_style_full_source.yaml
+    overrides:
+      runtime.case_name: ablation4_03_ss25_slat15
+      batch.config_name: ablation4_03_ss25_slat15
+      batch.group: ablation4
+      batch.pred_root: /cache/wangxinxing/data/temp/ablation4/03_ss25_slat15
+      ss.inversion.inversion_steps: 25
+      slat.inversion.inversion_steps: 15
+
+  - name: ablation4_04_ss20_slat20
+    base_config: edit_configs/ablation2/04_vox_style_full_source.yaml
+    overrides:
+      runtime.case_name: ablation4_04_ss20_slat20
+      batch.config_name: ablation4_04_ss20_slat20
+      batch.group: ablation4
+      batch.pred_root: /cache/wangxinxing/data/temp/ablation4/04_ss20_slat20
+      ss.inversion.inversion_steps: 20
+      slat.inversion.inversion_steps: 20
+
+  - name: ablation4_05_ss15_slat15
+    base_config: edit_configs/ablation2/04_vox_style_full_source.yaml
+    overrides:
+      runtime.case_name: ablation4_05_ss15_slat15
+      batch.config_name: ablation4_05_ss15_slat15
+      batch.group: ablation4
+      batch.pred_root: /cache/wangxinxing/data/temp/ablation4/05_ss15_slat15
+      ss.inversion.inversion_steps: 15
+      slat.inversion.inversion_steps: 15
+
+  - name: ablation4_06_ss10_slat10
+    base_config: edit_configs/ablation2/04_vox_style_full_source.yaml
+    overrides:
+      runtime.case_name: ablation4_06_ss10_slat10
+      batch.config_name: ablation4_06_ss10_slat10
+      batch.group: ablation4
+      batch.pred_root: /cache/wangxinxing/data/temp/ablation4/06_ss10_slat10
+      ss.inversion.inversion_steps: 10
+      slat.inversion.inversion_steps: 10

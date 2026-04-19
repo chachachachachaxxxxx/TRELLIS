@@ -1,0 +1,133 @@
+# ============================================================
+# VoxHammer baseline: 前 12 条案例
+#
+# 复原自历史 voxhammer batch 配置：
+# - preprocess.style = voxhammer
+# - SS: rf_solver + kv_blend + latent_blend
+# - SLAT: rf_solver + preserve_only inversion + kv_blend + latent_blend
+# ============================================================
+
+entrypoint: edit_full
+
+runtime:
+  model: microsoft/TRELLIS-image-large
+  seed: 42
+  device: cuda:0
+  attn_backend: sdpa
+  sparse_attn_backend: flash_attn
+  spconv_algo: native
+  skip_render: true
+  skip_glb: false
+  skip_ply: false
+
+preprocess:
+  style: voxhammer
+  crop_policy: union_crop
+  mask_policy: provided
+  adaptive_foreground_scale:
+    enabled: false
+
+ss:
+  sampler:
+    steps: 25
+  inversion:
+    enabled: true
+    denoise_init: inverted_terminal_noise
+    solver: rf_solver
+    predictor_corrector_steps: 0
+    denoise_cfg_strength: 6.0
+    denoise_cfg_interval: [0.5, 1.0]
+    inversion_cfg_strength: 5.0
+    inversion_cfg_interval: [0.5, 1.0]
+  controls:
+    p2p:
+      enabled: false
+    kv_blend:
+      enabled: true
+      t_start: 1.0
+      t_end: 0.0
+      self_attention: true
+      cross_attention: true
+      soft_mask:
+        enabled: false
+        dilation: 2
+        sigma: 1.0
+    latent_blend:
+      enabled: true
+      strength: 1.0
+      hard_mask_mode: edit_all
+      soft_mask:
+        enabled: false
+        dilation: 2
+        sigma: 1.0
+    uniedit:
+      enabled: false
+  output:
+    output_format: both
+    save_voxel_mesh: true
+
+slat:
+  sampler:
+    steps: 25
+  inversion:
+    enabled: true
+    denoise_init: terminal_noise
+    scope: preserve_only
+    solver: rf_solver
+    predictor_corrector_steps: 0
+    denoise_cfg_strength: 0.0
+    denoise_cfg_interval: [0.5, 1.0]
+    inversion_cfg_strength: 0.0
+    inversion_cfg_interval: [0.5, 1.0]
+  controls:
+    p2p:
+      enabled: false
+    kv_blend:
+      enabled: true
+      t_start: 1.0
+      t_end: 0.0
+      self_attention: true
+      cross_attention: true
+      soft_mask:
+        enabled: false
+        dilation: 2
+        sigma: 1.0
+    latent_blend:
+      enabled: true
+      soft_mask:
+        enabled: false
+        dilation: 2
+        sigma: 1.0
+    uniedit:
+      enabled: false
+  decode:
+    skip_source_decode: true
+    modes: [gaussian, mesh]
+
+batch:
+  config_name: voxhammer_first12
+  group: other_methods
+  gt_root: /cache/wangxinxing/data/trellis_edit_benchmark/edit3d_data/data
+  assets_root: /cache/wangxinxing/data/trellis_edit_benchmark/edit3d_data/renders
+  pred_root: /cache/wangxinxing/data/temp/voxhammer_first12
+  max_cases: 12
+  metrics:
+    - psnr
+    - ssim
+    - lpips
+    - fid
+    - dino_if_max
+    - dino_if_mean
+    - chamfer
+    - clip_t
+  skip_benchmark_render: false
+  skip_exists: false
+  keep_case_outputs: false
+  input_templates:
+    source_image: "{gt_root}/{dataset}/{object_name}/prompt_{prompt_id}/2d_render.png"
+    edit_image: "{gt_root}/{dataset}/{object_name}/prompt_{prompt_id}/2d_edit.png"
+    mask_image: "{gt_root}/{dataset}/{object_name}/prompt_{prompt_id}/2d_mask.png"
+    mask_glb: "{gt_root}/{dataset}/{object_name}/prompt_{prompt_id}/3d_edit_region.glb"
+    source_voxels: "{assets_root}/{dataset}/{object_name}/voxels.ply"
+    source_features: "{assets_root}/{dataset}/{object_name}/features.npz"
+    edited_coords: ""

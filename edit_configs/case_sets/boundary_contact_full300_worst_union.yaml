@@ -1,0 +1,59 @@
+name: boundary_contact_full300_worst_union
+description: >
+  Full300 主编辑基线（trellis_direct / nano3d / voxhammer / voxhammer_soft）
+  各自 worst-5 的并集。主要集中在 shell attachment、top-mounted accessory、
+  support replacement 和 compositional contact 这几类结构编辑失败。
+source_runs:
+  - edit_full_baseline1_trellis_direct_edit_by_image_20260415_153518
+  - legacy_import_baseline3_nano3d_replace_20260415_132849
+  - legacy_import_baseline2_voxhammer_20260415_132848
+  - legacy_import_baseline2_voxhammer_soft_20260415_132849
+cases:
+  - case_id: GSO/Dog/prompt_1
+    prompt_text: A dog in a suit.
+    selected_by: [nano3d, voxhammer, voxhammer_soft]
+    failure_mode: shell_attachment
+  - case_id: GSO/Dog/prompt_2
+    prompt_text: A dog in steel armor.
+    selected_by: [voxhammer, voxhammer_soft]
+    failure_mode: shell_attachment
+  - case_id: GSO/Dog/prompt_3
+    prompt_text: A dog with robot body.
+    selected_by: [voxhammer, voxhammer_soft]
+    failure_mode: shell_attachment
+  - case_id: GSO/Transformers_Age_of_Extinction_Stomp_and_Chomp_Grimlock_Figure/prompt_3
+    prompt_text: A robot dinosaur with tank treads.
+    selected_by: [nano3d, voxhammer, voxhammer_soft]
+    failure_mode: support_replacement
+  - case_id: GSO/Sonny_School_Bus/prompt_1
+    prompt_text: A cat driving a car.
+    selected_by: [trellis_direct, nano3d]
+    failure_mode: occupancy_composition
+  - case_id: GSO/3D_Dollhouse_Sink/prompt_1
+    prompt_text: A microwave oven is on the cabinet.
+    selected_by: [nano3d]
+    failure_mode: top_mounted_accessory
+  - case_id: GSO/Room_Essentials_Kitchen_Towels_16_x_26_2_count/prompt_3
+    prompt_text: A towel on the keyboard.
+    selected_by: [trellis_direct]
+    failure_mode: surface_contact
+  - case_id: PartObjaverse-Tiny/67e2e51a2c87480a999293f3c554d61d/prompt_2
+    prompt_text: An old toilet with a fish tank.
+    selected_by: [voxhammer, voxhammer_soft]
+    failure_mode: top_mounted_accessory
+  - case_id: PartObjaverse-Tiny/d5cbe3dc52d94d78848c111fb959e8f2/prompt_2
+    prompt_text: A fox with wheels.
+    selected_by: [trellis_direct]
+    failure_mode: support_replacement
+  - case_id: PartObjaverse-Tiny/8da95b178bc641d892f296e42c0ed8a0/prompt_1
+    prompt_text: A yellow robot vehicle with spider legs.
+    selected_by: [trellis_direct]
+    failure_mode: support_replacement
+  - case_id: PartObjaverse-Tiny/42e5ff17de214f0d8aabd509f090a46c/prompt_3
+    prompt_text: A gun spouting an apple.
+    selected_by: [trellis_direct]
+    failure_mode: protrusion_attachment
+  - case_id: PartObjaverse-Tiny/0c4e4a0b2a374553ae762bb33e8dd2d0/prompt_3
+    prompt_text: A blue ice cream with a donut base in the glass cup.
+    selected_by: [nano3d]
+    failure_mode: support_replacement
