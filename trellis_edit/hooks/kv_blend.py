@@ -59,7 +59,7 @@ class KVBlendHook(AttentionHook):
         return getattr(eval_spec, field_name)
 
     def set_eval_context(self, phase: Optional[str], *, eval_spec: Optional[Any] = None) -> None:
-        if phase not in {None, "inversion", "denoise"}:
+        if phase not in {None, "inversion", "denoise", "source_capture"}:
             raise ValueError(f"Unknown KV blend phase: {phase}")
         if phase is not None and eval_spec is None:
             raise ValueError("KV blend eval context requires eval_spec when phase is set.")
@@ -131,17 +131,18 @@ class KVBlendHook(AttentionHook):
         hook = self
 
         def wrapped_forward(model_self, x, t, cond):
-            source_capture = hook.current_source_capture
-            if source_capture is not None and source_capture.get("stage") == stage_name:
-                logical_t = float(source_capture["logical_t"])
-                phase = "source_capture"
-                eval_idx = 0
-            elif hook.current_phase is not None and hook.current_eval_spec is not None:
+            if hook.current_phase is not None and hook.current_eval_spec is not None:
                 logical_t = float(hook._eval_spec_field(hook.current_eval_spec, "logical_t"))
                 phase = hook.current_phase
                 eval_idx = int(hook._eval_spec_field(hook.current_eval_spec, "eval_idx"))
             else:
-                return original_forward(x, t, cond)
+                source_capture = hook.current_source_capture
+                if source_capture is not None and source_capture.get("stage") == stage_name:
+                    logical_t = float(source_capture["logical_t"])
+                    phase = "source_capture"
+                    eval_idx = int(source_capture.get("eval_idx", 0))
+                else:
+                    return original_forward(x, t, cond)
             t_value = float(t[0].detach().float().cpu().item()) if torch.is_tensor(t) else float(t)
             actual_t = t_value / 1000.0
             hook.current_forward_context = {
@@ -184,8 +185,8 @@ class KVBlendHook(AttentionHook):
         return config.cross_attention
 
     @staticmethod
-    def _snapshot_key(pass_kind: str, layer_idx: int, attn_type: str) -> str:
-        return "|".join((pass_kind, str(layer_idx), attn_type))
+    def _snapshot_key(pass_kind: str, eval_idx: int, layer_idx: int, attn_type: str) -> str:
+        return "|".join((pass_kind, str(eval_idx), str(layer_idx), attn_type))
 
     def _capture_dense_kv(
         self,
@@ -198,7 +199,7 @@ class KVBlendHook(AttentionHook):
         ctx = self.current_forward_context
         assert ctx is not None
         pending_snapshot = self._pending_step_source_snapshots.setdefault(stage_name, {})
-        key = self._snapshot_key(ctx["pass_kind"], layer_idx, attn_type)
+        key = self._snapshot_key(ctx["pass_kind"], int(ctx["eval_idx"]), layer_idx, attn_type)
         pending_snapshot[f"{key}|k"] = k.detach().cpu()
         pending_snapshot[f"{key}|v"] = v.detach().cpu()
 
@@ -218,7 +219,7 @@ class KVBlendHook(AttentionHook):
         active_snapshot = self._active_step_source_snapshots.get(stage_name)
         if active_snapshot is None:
             return None, None
-        key = self._snapshot_key(ctx["pass_kind"], layer_idx, attn_type)
+        key = self._snapshot_key(ctx["pass_kind"], int(ctx["eval_idx"]), layer_idx, attn_type)
         cache_k = active_snapshot.get(f"{key}|k")
         cache_v = active_snapshot.get(f"{key}|v")
         if cache_k is None or cache_v is None:
@@ -426,7 +427,7 @@ class KVBlendHook(AttentionHook):
             assert ctx is not None
             if ctx["phase"] == "source_capture":
                 snapshot = hook._pending_step_source_snapshots.setdefault(stage_name, {})
-                key = hook._snapshot_key(ctx["pass_kind"], layer_idx, "self")
+                key = hook._snapshot_key(ctx["pass_kind"], int(ctx["eval_idx"]), layer_idx, "self")
                 snapshot[f"{key}|k_sparse"] = k.cpu()
                 snapshot[f"{key}|v_sparse"] = v.cpu()
             elif ctx["phase"] == "denoise":
@@ -436,7 +437,7 @@ class KVBlendHook(AttentionHook):
                 active_t = hook._active_step_source_times.get(stage_name)
                 active_snapshot = hook._active_step_source_snapshots.get(stage_name)
                 if active_t is not None and abs(active_t - float(ctx["logical_t"])) <= 1e-6 and active_snapshot is not None:
-                    cache_key = hook._snapshot_key(ctx["pass_kind"], layer_idx, "self")
+                    cache_key = hook._snapshot_key(ctx["pass_kind"], int(ctx["eval_idx"]), layer_idx, "self")
                     cached_k = active_snapshot.get(f"{cache_key}|k_sparse")
                     cached_v = active_snapshot.get(f"{cache_key}|v_sparse")
                 preserve_coords, edit_weights = hook._resolve_sparse_self_mask(sparse_mask)

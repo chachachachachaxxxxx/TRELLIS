@@ -1281,7 +1281,7 @@ class _ControlledDenoisePluginBase(_ControlledDenoiseHookSupportMixin):
                     source_slat_trace = prepare_result
                     source_slat_terminal_noise = None
                 if verbose:
-                    print(f"Built {len(source_slat_trace)} SLAT source-trace steps")
+                    print(f"Built {len(source_slat_trace)} SLAT source-trace entries")
                 _release_cuda_memory()
             else:
                 print("Skipping SLAT source inversion; using pure target denoising.")
@@ -1348,7 +1348,11 @@ class _ControlledDenoisePluginBase(_ControlledDenoiseHookSupportMixin):
                         config,
                         edit_coords=edit_coords,
                         initial_sample=projected_slat_noise,
-                        source_trace=source_slat_trace if blend_slat_enabled else None,
+                        source_trace=(
+                            source_slat_trace
+                            if (blend_slat_enabled or kv_blend_enabled)
+                            else None
+                        ),
                         source_cond_dict=source_cond_dict,
                         latent_mask=slat_blend_mask,
                         solver_mode=inversion_mode,
@@ -1372,7 +1376,7 @@ class _ControlledDenoisePluginBase(_ControlledDenoiseHookSupportMixin):
                         config,
                         edit_coords=edit_coords,
                         initial_sample=None,
-                        source_trace=None,
+                        source_trace=source_slat_trace if kv_blend_enabled else None,
                         source_cond_dict=source_cond_dict,
                         latent_mask=None,
                         solver_mode=inversion_mode,

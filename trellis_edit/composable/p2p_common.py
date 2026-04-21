@@ -768,6 +768,11 @@ class ControlledDenoiseCommonMixin:
         )
 
         source_trace = SourceTrace()
+        source_trace.add_entry(
+            step_index=-1,
+            logical_t=0.0,
+            sample=sample.cpu(),
+        )
 
         with torch.inference_mode():
             for i, (t_curr, t_next) in enumerate(t_pairs):
@@ -1006,7 +1011,7 @@ class ControlledDenoiseCommonMixin:
             return sample.to(device=device, dtype=dtype)
         raise TypeError(f"Unsupported source trace sample type: {type(sample)!r}")
 
-    def _prepare_step_source_snapshot(
+    def _prepare_step_source_snapshots(
         self,
         *,
         hook: Any | None,
@@ -1014,36 +1019,55 @@ class ControlledDenoiseCommonMixin:
         model,
         source_trace: SourceTrace | None,
         source_cond_dict: Dict[str, Any] | None,
-        logical_t: float,
+        step_ctx: StepContext,
         cfg_strength: float,
         cfg_interval: Tuple[float, float],
+        solver_mode: str,
     ) -> None:
         if hook is None or not hasattr(hook, "requires_step_source_snapshot"):
             return
         if source_trace is None or source_cond_dict is None:
             return
-        if not hook.requires_step_source_snapshot(stage_name, logical_t):
+        if not hook.requires_step_source_snapshot(stage_name, step_ctx.logical_t):
             return
 
-        source_entry = source_trace.get_entry(logical_t)
+        source_entry = source_trace.get_entry(step_ctx.logical_t)
         if source_entry is None:
             return
 
         device = source_cond_dict["cond"].device
         source_sample = self._trace_sample_to_device(source_entry.sample, device=device)
-        need_neg = bool(cfg_strength > 0.0 and cfg_interval[0] <= logical_t <= cfg_interval[1])
+        predictor_eval_specs = self._build_predictor_eval_specs(
+            step_ctx=step_ctx,
+            solver_mode=solver_mode,
+        )
         hook.clear_step_source_snapshot(stage_name=stage_name)
-        hook.begin_step_source_capture(stage_name=stage_name, logical_t=logical_t)
+        hook.begin_step_source_capture(stage_name=stage_name, logical_t=step_ctx.logical_t)
         try:
-            t_tensor = torch.tensor([1000.0 * logical_t], device=device, dtype=torch.float32)
-            model(source_sample, t_tensor, source_cond_dict["cond"])
-            if need_neg:
-                model(source_sample, t_tensor, source_cond_dict["neg_cond"])
-            snapshot = hook.end_step_source_capture(stage_name=stage_name, logical_t=logical_t)
+            replay_sample = source_sample
+            dt = float(step_ctx.t_next - step_ctx.t_curr)
+            for eval_idx, eval_spec in enumerate(predictor_eval_specs):
+                pred_v = self._predict_with_optional_cfg(
+                    model,
+                    replay_sample,
+                    source_cond_dict,
+                    cfg_strength=cfg_strength,
+                    cfg_interval=cfg_interval,
+                    eval_spec=eval_spec,
+                    hook=hook,
+                    phase="source_capture",
+                )
+                if eval_idx == 0 and len(predictor_eval_specs) > 1:
+                    replay_sample = source_sample + 0.5 * dt * pred_v
+            snapshot = hook.end_step_source_capture(stage_name=stage_name, logical_t=step_ctx.logical_t)
         except Exception:
             hook.cancel_step_source_capture(stage_name=stage_name)
             raise
-        hook.set_step_source_snapshot(stage_name=stage_name, logical_t=logical_t, snapshot=snapshot)
+        hook.set_step_source_snapshot(
+            stage_name=stage_name,
+            logical_t=step_ctx.logical_t,
+            snapshot=snapshot,
+        )
 
     def _denoise_ss_with_step_blend(
         self,
@@ -1129,7 +1153,6 @@ class ControlledDenoiseCommonMixin:
                         t_next=t_next,
                     ),
                 )
-
                 if source_trace is not None and mask is not None:
                     source_latent = source_trace.get_sample(step_ctx.logical_t)
                     if source_latent is not None:
@@ -1138,15 +1161,16 @@ class ControlledDenoiseCommonMixin:
                             blend_strength * source_latent + (1 - blend_strength) * sample
                         )
 
-                self._prepare_step_source_snapshot(
+                self._prepare_step_source_snapshots(
                     hook=hook,
                     stage_name="ss",
                     model=flow_model,
                     source_trace=source_trace,
                     source_cond_dict=source_cond_dict,
-                    logical_t=step_ctx.logical_t,
+                    step_ctx=step_ctx,
                     cfg_strength=cfg_strength,
                     cfg_interval=cfg_interval,
+                    solver_mode=solver_mode,
                 )
                 try:
                     sample = self._sample_with_solver(
@@ -1244,21 +1268,21 @@ class ControlledDenoiseCommonMixin:
                         t_next=t_next,
                     ),
                 )
-
                 if source_trace is not None and latent_mask is not None:
                     source_latent = source_trace.get_sample(step_ctx.logical_t)
                     if source_latent is not None:
                         sample, _ = blend_sparse_features(sample, source_latent, latent_mask)
 
-                self._prepare_step_source_snapshot(
+                self._prepare_step_source_snapshots(
                     hook=hook,
                     stage_name="slat",
                     model=flow_model,
                     source_trace=source_trace,
                     source_cond_dict=source_cond_dict,
-                    logical_t=step_ctx.logical_t,
+                    step_ctx=step_ctx,
                     cfg_strength=cfg_strength,
                     cfg_interval=cfg_interval,
+                    solver_mode=solver_mode,
                 )
                 try:
                     sample = self._sample_with_solver(
