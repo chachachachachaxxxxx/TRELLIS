@@ -12,7 +12,8 @@ from PIL import Image
 from trellis_edit.common import ensure_pipeline_encoders, save_outputs, write_json
 from trellis_edit.inversion.uniedit_sampler import UniEditRFSolver
 from trellis_edit.inversion.rf_sampler import RFSolverSampler, resolve_inversion_steps
-from trellis_edit.composable.p2p_common import P2PLatentBlendCommonMixin
+from trellis_edit.composable.p2p_common import ControlledDenoiseCommonMixin
+from trellis_edit.composable.runtime import SourceTrace
 from trellis_edit.preprocess.asset_3d import (
     coords_to_flat_indices,
     coords_to_voxel,
@@ -32,6 +33,7 @@ from trellis_edit.samplers import (
 from trellis_edit.utils.uniedit_utils import (
     build_stage2_selector,
     compose_stage1_coords,
+    compose_stage1_coords_restore_all_outside_mask,
     compose_stage1_coords_boundary_band_restore,
     coords3d_to_batched,
 )
@@ -183,6 +185,29 @@ def _ss_voxel_mesh_export_meta(enabled: bool) -> dict[str, Any]:
     return {"voxel_mesh_export": voxel_mesh_glb_transform_payload()}
 
 
+def _resolve_ss_edit_region_mode(config: SSStageConfig) -> str:
+    mode_sources: list[tuple[str, str]] = []
+    if config.controls.kv_blend.enabled:
+        mode_sources.append(
+            ("ss.controls.kv_blend.edit_region_mode", str(config.controls.kv_blend.edit_region_mode))
+        )
+    if config.controls.latent_blend.enabled:
+        mode_sources.append(
+            ("ss.controls.latent_blend.edit_region_mode", str(config.controls.latent_blend.edit_region_mode))
+        )
+    if not mode_sources:
+        return "mask_only"
+
+    resolved_modes = {mode for _, mode in mode_sources}
+    if len(resolved_modes) != 1:
+        details = ", ".join(f"{field}={mode}" for field, mode in mode_sources)
+        raise RuntimeError(
+            "SS blend controls must use the same edit_region_mode when enabled together. "
+            f"Got: {details}"
+        )
+    return mode_sources[0][1]
+
+
 def _resolve_decode_modes(
     requested_modes: tuple[str, ...] | list[str],
     *,
@@ -249,6 +274,16 @@ def _apply_ss_postprocess(
         if mask_coords is None:
             raise RuntimeError("ss.postprocess.mode='restore_source_outside_mask' requires mask_glb.")
         return compose_stage1_coords(
+            coords_source=source_coords,
+            coords_stage1_raw=coords_stage1_raw,
+            mask_coords=mask_coords,
+        )
+    if mode == "restore_all_outside_mask":
+        if source_coords is None:
+            raise RuntimeError("ss.postprocess.mode='restore_all_outside_mask' requires source voxels.")
+        if mask_coords is None:
+            raise RuntimeError("ss.postprocess.mode='restore_all_outside_mask' requires mask_glb.")
+        return compose_stage1_coords_restore_all_outside_mask(
             coords_source=source_coords,
             coords_stage1_raw=coords_stage1_raw,
             mask_coords=mask_coords,
@@ -401,7 +436,7 @@ class _StageRunConfig:
     extra_params: dict[str, Any] | None = None
 
 
-class _P2PHookSupportMixin(P2PLatentBlendCommonMixin):
+class _ControlledDenoiseHookSupportMixin(ControlledDenoiseCommonMixin):
     def __init__(self) -> None:
         self.hook = None
 
@@ -420,7 +455,7 @@ class _P2PHookSupportMixin(P2PLatentBlendCommonMixin):
             hook.patch_model(pipeline.models["slat_flow_model"], "slat")
 
 
-class UniEditSSAdapter(_P2PHookSupportMixin, SSStagePlugin):
+class UniEditSSAdapter(_ControlledDenoiseHookSupportMixin, SSStagePlugin):
     name = "uniedit"
 
     def run(
@@ -865,7 +900,7 @@ class AnchorFlowSSAdapter(SSStagePlugin):
         )
 
 
-class _P2PLatentBlendPluginBase(_P2PHookSupportMixin):
+class _ControlledDenoisePluginBase(_ControlledDenoiseHookSupportMixin):
 
     @staticmethod
     def _build_coord_hash_set(coords: torch.Tensor) -> set[str]:
@@ -916,12 +951,12 @@ class _P2PLatentBlendPluginBase(_P2PHookSupportMixin):
         resolution: int,
         return_terminal_noise: bool = False,
         hook: Any | None = None,
-    ) -> dict[str, torch.Tensor] | tuple[dict[str, torch.Tensor], torch.Tensor]:
+    ) -> SourceTrace | tuple[SourceTrace, torch.Tensor]:
         if torch.cuda.is_available():
             print(f"[Memory] Before inversion - Allocated: {torch.cuda.memory_allocated()/1024**3:.2f} GB")
         terminal_noise = None
         if return_terminal_noise:
-            latent_cache, terminal_noise = self._prepare_ss_latent_and_terminal_from_coords(
+            source_trace, terminal_noise = self._prepare_ss_latent_and_terminal_from_coords(
                 pipeline,
                 source_coords,
                 source_cond_dict,
@@ -931,7 +966,7 @@ class _P2PLatentBlendPluginBase(_P2PHookSupportMixin):
                 hook=hook,
             )
         else:
-            latent_cache = self._prepare_ss_latent_from_coords(
+            source_trace = self._prepare_ss_latent_from_coords(
                 pipeline,
                 source_coords,
                 source_cond_dict,
@@ -942,10 +977,10 @@ class _P2PLatentBlendPluginBase(_P2PHookSupportMixin):
             )
         if torch.cuda.is_available():
             print(f"[Memory] After inversion - Allocated: {torch.cuda.memory_allocated()/1024**3:.2f} GB")
-        print(f"[Memory] Latent cache size: {len(latent_cache)} timesteps")
+        print(f"[Memory] Source trace size: {len(source_trace)} timesteps")
         if return_terminal_noise:
-            return latent_cache, terminal_noise
-        return latent_cache
+            return source_trace, terminal_noise
+        return source_trace
 
     @staticmethod
     def _blend_coords_with_mask(
@@ -953,7 +988,7 @@ class _P2PLatentBlendPluginBase(_P2PHookSupportMixin):
         edit_coords: torch.Tensor,
         mask_coords: torch.Tensor,
     ) -> torch.Tensor:
-        mask_hash_set = _P2PLatentBlendPluginBase._build_mask_hash_set(mask_coords)
+        mask_hash_set = _ControlledDenoisePluginBase._build_mask_hash_set(mask_coords)
         blended_set = set()
         blended_coords_list = []
 
@@ -1077,7 +1112,7 @@ class _P2PLatentBlendPluginBase(_P2PHookSupportMixin):
         preserve_coords: torch.Tensor | None = None,
         return_terminal_noise: bool = False,
         hook: Any | None = None,
-    ) -> dict[str, Any] | tuple[dict[str, Any], Any]:
+    ) -> SourceTrace | tuple[SourceTrace, Any]:
         source_for_inversion = source_slat
         if inversion_scope == "preserve_only":
             if preserve_coords is None:
@@ -1085,16 +1120,16 @@ class _P2PLatentBlendPluginBase(_P2PHookSupportMixin):
             if preserve_coords.shape[0] == 0:
                 print("[WARN] SLAT preserve set is empty; skipping SLAT inversion cache generation.")
                 if return_terminal_noise:
-                    return {}, None
-                return {}
+                    return SourceTrace(), None
+                return SourceTrace()
             source_codes = coords_to_flat_indices(source_slat.coords, resolution)
             preserve_codes = coords_to_flat_indices(preserve_coords, resolution)
             keep_mask = torch.isin(source_codes, preserve_codes)
             if not keep_mask.any():
                 print("[WARN] No overlapping preserve coordinates found in source SLAT; skipping inversion cache generation.")
                 if return_terminal_noise:
-                    return {}, None
-                return {}
+                    return SourceTrace(), None
+                return SourceTrace()
             source_for_inversion = source_slat.replace(
                 source_slat.feats[keep_mask],
                 source_slat.coords[keep_mask],
@@ -1104,7 +1139,7 @@ class _P2PLatentBlendPluginBase(_P2PHookSupportMixin):
         source_slat_normalized = (source_for_inversion - mean) / std
         print(
             "Running "
-            f"{'simple Euler' if inversion_mode == 'simple' else 'RF-Solver'} inversion for SLAT "
+            f"{self._solver_display_name(inversion_mode)} inversion for SLAT "
             f"(scope={inversion_scope})..."
         )
         extra = config.extra_params or {}
@@ -1128,6 +1163,15 @@ class _P2PLatentBlendPluginBase(_P2PHookSupportMixin):
         )
 
     @staticmethod
+    def _denormalize_slat_sample(pipeline, slat_normalized):
+        device = getattr(slat_normalized, "device", None)
+        if device is None:
+            device = slat_normalized.feats.device
+        std = torch.tensor(pipeline.slat_normalization["std"], device=device)[None]
+        mean = torch.tensor(pipeline.slat_normalization["mean"], device=device)[None]
+        return slat_normalized * std + mean
+
+    @staticmethod
     def _denoise_slat_from_terminal_noise(
         pipeline,
         *,
@@ -1144,9 +1188,7 @@ class _P2PLatentBlendPluginBase(_P2PHookSupportMixin):
             verbose=True,
         ).samples
 
-        std = torch.tensor(pipeline.slat_normalization["std"], device=slat_normalized.device)[None]
-        mean = torch.tensor(pipeline.slat_normalization["mean"], device=slat_normalized.device)[None]
-        return slat_normalized * std + mean
+        return _ControlledDenoisePluginBase._denormalize_slat_sample(pipeline, slat_normalized)
 
     def _run_slat_stage(
         self,
@@ -1180,7 +1222,7 @@ class _P2PLatentBlendPluginBase(_P2PHookSupportMixin):
         denoise_init = str(extra.get("slat_denoise_init", "terminal_noise"))
         inversion_scope = str(extra.get("slat_inversion_scope", "full_source"))
 
-        source_slat_latent_cache = None
+        source_slat_trace = None
         source_slat_terminal_noise = None
         original_slat_sampler = pipeline.slat_sampler
         slat_blend_mask: torch.Tensor | SparseLatentBlendMask | None = None
@@ -1208,12 +1250,20 @@ class _P2PLatentBlendPluginBase(_P2PHookSupportMixin):
                     f"{nano3d_replace_coords.shape[0]} overlapping outside-mask coords"
                 )
 
-            if denoise_init == "terminal_noise":
-                if not inversion_enabled or source_slat is None or source_cond_dict is None:
+            if denoise_init not in {"terminal_noise", "random_noise"}:
+                raise ValueError(f"Unknown slat_denoise_init: {denoise_init}")
+
+            if inversion_enabled:
+                if source_slat is None or source_cond_dict is None:
                     raise RuntimeError("SLAT inversion requires source SLAT features and source conditioning.")
-                print("Preparing source SLAT terminal noise via inversion...")
+                inversion_label = (
+                    "source SLAT terminal noise"
+                    if denoise_init == "terminal_noise"
+                    else "source SLAT inversion cache"
+                )
+                print(f"Preparing {inversion_label} via inversion...")
                 _release_cuda_memory()
-                source_slat_latent_cache, source_slat_terminal_noise = self._prepare_slat_source(
+                prepare_result = self._prepare_slat_source(
                     pipeline,
                     source_slat,
                     source_cond_dict,
@@ -1222,12 +1272,21 @@ class _P2PLatentBlendPluginBase(_P2PHookSupportMixin):
                     resolution=resolution,
                     inversion_scope=inversion_scope,
                     preserve_coords=preserve_coords,
-                    return_terminal_noise=True,
+                    return_terminal_noise=denoise_init == "terminal_noise",
                     hook=hook,
                 )
+                if denoise_init == "terminal_noise":
+                    source_slat_trace, source_slat_terminal_noise = prepare_result
+                else:
+                    source_slat_trace = prepare_result
+                    source_slat_terminal_noise = None
                 if verbose:
-                    print(f"Cached {len(source_slat_latent_cache)} SLAT latent timesteps")
+                    print(f"Built {len(source_slat_trace)} SLAT source-trace steps")
                 _release_cuda_memory()
+            else:
+                print("Skipping SLAT source inversion; using pure target denoising.")
+
+            if denoise_init == "terminal_noise":
                 if source_slat_terminal_noise is None:
                     raise RuntimeError(
                         "slat.inversion.denoise_init='terminal_noise' requires a terminal noise cache."
@@ -1242,17 +1301,10 @@ class _P2PLatentBlendPluginBase(_P2PHookSupportMixin):
                     resolution=resolution,
                 )
                 _release_cuda_memory()
-            elif denoise_init == "random_noise":
-                if blend_slat_enabled:
-                    raise RuntimeError(
-                        "slat.denoise_init='random_noise' is incompatible with blend_enabled=true. "
-                        "Disable SLAT blending or switch back to terminal_noise."
-                    )
-                print("Skipping SLAT source inversion; using random noise init.")
             else:
-                raise ValueError(f"Unknown slat_denoise_init: {denoise_init}")
+                print("Using random-noise SLAT init.")
 
-            if blend_slat_enabled and source_slat_latent_cache is not None and mask_coords is not None:
+            if blend_slat_enabled and source_slat_trace is not None and mask_coords is not None:
                 print("Setting up SLAT latent blending...")
                 slat_blend_mask = self._build_slat_blend_mask(
                     source_slat=source_slat,
@@ -1263,12 +1315,12 @@ class _P2PLatentBlendPluginBase(_P2PHookSupportMixin):
                     soft_mask_dilation=soft_mask_dilation,
                     soft_mask_sigma=soft_mask_sigma,
                 )
-                if not (kv_blend_enabled or inversion_mode == "rf_solver"):
+                if not (kv_blend_enabled or self._is_rf_family_solver(inversion_mode)):
                     slat_sampler = LatentBlendFlowEulerGuidanceIntervalSampler(
                         sigma_min=original_slat_sampler.sigma_min
                     )
                     slat_sampler.set_blend_source(
-                        source_latent_cache=source_slat_latent_cache,
+                        source_trace=source_slat_trace,
                         latent_mask=slat_blend_mask,
                         is_sparse=True,
                     )
@@ -1284,24 +1336,26 @@ class _P2PLatentBlendPluginBase(_P2PHookSupportMixin):
             )
             use_custom_slat_loop = bool(
                 kv_blend_enabled
-                or inversion_mode == "rf_solver"
+                or self._is_rf_family_solver(inversion_mode)
                 or slat_denoise_start_step < slat_total_steps
             )
             if denoise_init == "terminal_noise":
                 print("Generating edit SLAT from projected terminal noise...")
                 if use_custom_slat_loop:
-                    edit_slat = self._denoise_slat_with_step_blend(
+                    edit_slat_normalized = self._denoise_slat_with_step_blend(
                         pipeline,
                         edit_cond_dict,
                         config,
                         edit_coords=edit_coords,
                         initial_sample=projected_slat_noise,
-                        source_latent_cache=source_slat_latent_cache if blend_slat_enabled else None,
+                        source_trace=source_slat_trace if blend_slat_enabled else None,
+                        source_cond_dict=source_cond_dict,
                         latent_mask=slat_blend_mask,
                         solver_mode=inversion_mode,
                         verbose=True,
                         hook=hook,
                     )
+                    edit_slat = self._denormalize_slat_sample(pipeline, edit_slat_normalized)
                 else:
                     edit_slat = self._denoise_slat_from_terminal_noise(
                         pipeline,
@@ -1312,18 +1366,20 @@ class _P2PLatentBlendPluginBase(_P2PHookSupportMixin):
             else:
                 print("Generating edit SLAT from random noise...")
                 if use_custom_slat_loop:
-                    edit_slat = self._denoise_slat_with_step_blend(
+                    edit_slat_normalized = self._denoise_slat_with_step_blend(
                         pipeline,
                         edit_cond_dict,
                         config,
                         edit_coords=edit_coords,
                         initial_sample=None,
-                        source_latent_cache=None,
+                        source_trace=None,
+                        source_cond_dict=source_cond_dict,
                         latent_mask=None,
                         solver_mode=inversion_mode,
                         verbose=True,
                         hook=hook,
                     )
+                    edit_slat = self._denormalize_slat_sample(pipeline, edit_slat_normalized)
                 else:
                     edit_slat = pipeline.sample_slat(
                         edit_cond_dict,
@@ -1332,7 +1388,6 @@ class _P2PLatentBlendPluginBase(_P2PHookSupportMixin):
                     )
             if verbose:
                 print(f"Edit SLAT: {edit_slat.coords.shape[0]} voxels")
-
             if slat_blend_mask is not None:
                 print("Applying final SLAT feature merge...")
                 edit_slat, final_blend_stats = self._apply_final_slat_feature_blend(
@@ -1363,8 +1418,8 @@ class _P2PLatentBlendPluginBase(_P2PHookSupportMixin):
                 del source_slat_terminal_noise
             if projected_slat_noise is not None:
                 del projected_slat_noise
-            if source_slat_latent_cache is not None:
-                del source_slat_latent_cache
+            if source_slat_trace is not None:
+                del source_slat_trace
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -1427,8 +1482,8 @@ class _P2PLatentBlendPluginBase(_P2PHookSupportMixin):
                 pipeline.models[key] = model.to(pipeline.device)
 
 
-class P2PLatentBlendSSAdapter(_P2PLatentBlendPluginBase, SSStagePlugin):
-    name = "p2p"
+class ControlledDenoiseSSAdapter(_ControlledDenoisePluginBase, SSStagePlugin):
+    name = "controlled_denoise"
 
     def run(
         self,
@@ -1437,7 +1492,7 @@ class P2PLatentBlendSSAdapter(_P2PLatentBlendPluginBase, SSStagePlugin):
         config: SSStageConfig,
     ) -> SSArtifact:
         if config.controls.uniedit.enabled:
-            raise RuntimeError("P2P SS adapter does not accept ss.controls.uniedit.enabled=true")
+            raise RuntimeError("controlled_denoise SS adapter does not accept ss.controls.uniedit.enabled=true")
         source_voxels_path = context.config.inputs.source_voxels
         source_coords = None
         mask_coords = None
@@ -1455,6 +1510,7 @@ class P2PLatentBlendSSAdapter(_P2PLatentBlendPluginBase, SSStagePlugin):
         source_image, edit_image, mask_image = _prepared_images(preprocess)
         edit_cond_dict = pipeline.get_cond([edit_image])
         source_cond_dict = None
+        ss_edit_region_mode = _resolve_ss_edit_region_mode(config)
         if config.inversion.enabled or config.controls.p2p.enabled or config.controls.kv_blend.enabled:
             source_cond_dict = pipeline.get_cond([source_image])
 
@@ -1475,6 +1531,7 @@ class P2PLatentBlendSSAdapter(_P2PLatentBlendPluginBase, SSStagePlugin):
             "ss_inversion_cfg_strength": config.inversion.inversion_cfg_strength,
             "ss_inversion_cfg_interval_start": config.inversion.inversion_cfg_interval[0],
             "ss_inversion_cfg_interval_end": config.inversion.inversion_cfg_interval[1],
+            "ss_edit_region_mode": ss_edit_region_mode,
         }
         token_meta = None
         stage_configs = {}
@@ -1488,9 +1545,11 @@ class P2PLatentBlendSSAdapter(_P2PLatentBlendPluginBase, SSStagePlugin):
                 "ss": {
                     "self": self._build_ss_self_kv_token_mask(
                         mask_coords,
+                        source_coords=source_coords,
                         resolution=resolution,
                         latent_resolution=pipeline.models["sparse_structure_flow_model"].resolution,
                         hard_mask_mode=config.controls.latent_blend.hard_mask_mode,
+                        edit_region_mode=ss_edit_region_mode,
                         soft_mask_enabled=config.controls.kv_blend.soft_mask.enabled,
                         soft_mask_dilation=config.controls.kv_blend.soft_mask.dilation,
                         soft_mask_sigma=config.controls.kv_blend.soft_mask.sigma,
@@ -1547,11 +1606,11 @@ class P2PLatentBlendSSAdapter(_P2PLatentBlendPluginBase, SSStagePlugin):
             else None
         )
 
-        latent_cache = None
+        source_trace = None
         terminal_noise = None
         if config.inversion.enabled:
             print(f"Step 1: Inverting source SS (mode={config.inversion.solver})...")
-            latent_cache, terminal_noise = self._prepare_ss_source(
+            source_trace, terminal_noise = self._prepare_ss_source(
                 pipeline,
                 source_coords,
                 source_cond_dict,
@@ -1571,15 +1630,17 @@ class P2PLatentBlendSSAdapter(_P2PLatentBlendPluginBase, SSStagePlugin):
             model = pipeline.models["sparse_structure_flow_model"]
             latent_mask = self._build_ss_latent_mask(
                 mask_coords,
+                source_coords=source_coords,
                 resolution=resolution,
                 channels=model.in_channels,
                 latent_resolution=model.resolution,
                 hard_mask_mode=config.controls.latent_blend.hard_mask_mode,
+                edit_region_mode=ss_edit_region_mode,
                 soft_mask_enabled=config.controls.latent_blend.soft_mask.enabled,
                 soft_mask_dilation=config.controls.latent_blend.soft_mask.dilation,
                 soft_mask_sigma=config.controls.latent_blend.soft_mask.sigma,
             )
-            print("Step 3: Running SS denoising with P2P + latent blending from inverted terminal noise...")
+            print("Step 3: Running SS denoising with latent blending from inverted terminal noise...")
         elif config.inversion.enabled:
             print("Step 2: SS blend disabled; using inverted terminal noise as denoising init.")
             print("Step 3: Running SS denoising from inverted terminal noise...")
@@ -1593,7 +1654,8 @@ class P2PLatentBlendSSAdapter(_P2PLatentBlendPluginBase, SSStagePlugin):
             edit_cond_dict,
             stage_config,
             initial_sample=terminal_noise,
-            source_latent_cache=latent_cache if config.controls.latent_blend.enabled else None,
+            source_trace=source_trace if config.controls.latent_blend.enabled or config.controls.kv_blend.enabled else None,
+            source_cond_dict=source_cond_dict,
             latent_mask=latent_mask,
             blend_strength=config.controls.latent_blend.strength,
             solver_mode=config.inversion.solver,
@@ -1625,7 +1687,6 @@ class P2PLatentBlendSSAdapter(_P2PLatentBlendPluginBase, SSStagePlugin):
             ),
         )
         print(f"SS Stage complete: {ss_meta['stage1_masked_voxel_count']} voxels")
-
         voxel_mesh = None
         if config.output.save_voxel_mesh:
             voxel_mesh = coords_to_cubic_mesh(coords_edited, resolution)
@@ -1651,6 +1712,7 @@ class P2PLatentBlendSSAdapter(_P2PLatentBlendPluginBase, SSStagePlugin):
                 "blend_enabled": config.controls.latent_blend.enabled,
                 "blend_strength": config.controls.latent_blend.strength,
                 "ss_hard_mask_mode": config.controls.latent_blend.hard_mask_mode,
+                "ss_edit_region_mode": ss_edit_region_mode,
                 "ss_denoise_init": config.inversion.denoise_init,
                 "ss_denoise_solver_mode": config.inversion.solver,
                 "ss_kv_blend_enabled": config.controls.kv_blend.enabled,
@@ -1683,7 +1745,7 @@ class P2PLatentBlendSSAdapter(_P2PLatentBlendPluginBase, SSStagePlugin):
         )
 
 
-class UniEditSLATAdapter(_P2PLatentBlendPluginBase, SLATStagePlugin):
+class UniEditSLATAdapter(_ControlledDenoisePluginBase, SLATStagePlugin):
     name = "uniedit"
 
     def run(
@@ -1969,7 +2031,7 @@ class UniEditSLATAdapter(_P2PLatentBlendPluginBase, SLATStagePlugin):
         return slat_normalized * std + mean
 
 
-class DirectTargetSLATAdapter(_P2PLatentBlendPluginBase, SLATStagePlugin):
+class DirectTargetSLATAdapter(_ControlledDenoisePluginBase, SLATStagePlugin):
     name = "direct_target"
 
     def run(
@@ -2106,8 +2168,8 @@ class DirectTargetSLATAdapter(_P2PLatentBlendPluginBase, SLATStagePlugin):
         return _save_slat_metadata(artifact, out_dir)
 
 
-class P2PLatentBlendSLATAdapter(_P2PLatentBlendPluginBase, SLATStagePlugin):
-    name = "p2p"
+class ControlledDenoiseSLATAdapter(_ControlledDenoisePluginBase, SLATStagePlugin):
+    name = "controlled_denoise"
 
     def run(
         self,
@@ -2117,7 +2179,7 @@ class P2PLatentBlendSLATAdapter(_P2PLatentBlendPluginBase, SLATStagePlugin):
         ss_artifact: SSArtifact | None,
     ) -> SLATArtifact:
         if config.controls.uniedit.enabled:
-            raise RuntimeError("P2P SLAT adapter does not accept slat.controls.uniedit.enabled=true")
+            raise RuntimeError("controlled_denoise SLAT adapter does not accept slat.controls.uniedit.enabled=true")
         self._output_options = _runtime_output_params(context.config.runtime)
         edited_coords_path = context.config.inputs.edited_coords
         if ss_artifact is not None:
@@ -2173,7 +2235,7 @@ class P2PLatentBlendSLATAdapter(_P2PLatentBlendPluginBase, SLATStagePlugin):
             mask_coords = mask_result.coords
             print(f"Mask coords: {mask_coords.shape[0]} voxels")
         elif config.controls.latent_blend.enabled:
-            raise RuntimeError("P2P SLAT requires inputs.mask_glb when blending is enabled")
+            raise RuntimeError("controlled_denoise SLAT requires inputs.mask_glb when blending is enabled")
 
         extra = {
             "slat_t_start": config.controls.p2p.t_start,
@@ -2204,9 +2266,9 @@ class P2PLatentBlendSLATAdapter(_P2PLatentBlendPluginBase, SLATStagePlugin):
         stage_configs = {}
         if config.controls.kv_blend.enabled:
             if source_coords is None:
-                raise RuntimeError("P2P SLAT with kv_blend requires inputs.source_voxels")
+                raise RuntimeError("controlled_denoise SLAT with kv_blend requires inputs.source_voxels")
             if mask_coords is None:
-                raise RuntimeError("P2P SLAT with kv_blend requires inputs.mask_glb")
+                raise RuntimeError("controlled_denoise SLAT with kv_blend requires inputs.mask_glb")
             _, preserve_coords, _ = compose_stage1_coords(
                 coords_source=source_coords,
                 coords_stage1_raw=edited_coords_raw,
@@ -2382,11 +2444,11 @@ SS_PLUGIN_REGISTRY: dict[str, type[SSStagePlugin]] = {
     "anchorflow": AnchorFlowSSAdapter,
     "flowedit": FlowEditSSAdapter,
     "uniedit": UniEditSSAdapter,
-    "p2p": P2PLatentBlendSSAdapter,
+    "controlled_denoise": ControlledDenoiseSSAdapter,
 }
 
 SLAT_PLUGIN_REGISTRY: dict[str, type[SLATStagePlugin]] = {
     "direct_target": DirectTargetSLATAdapter,
     "uniedit": UniEditSLATAdapter,
-    "p2p": P2PLatentBlendSLATAdapter,
+    "controlled_denoise": ControlledDenoiseSLATAdapter,
 }

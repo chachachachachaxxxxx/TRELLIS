@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Iterable, Optional, Tuple
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -17,18 +18,33 @@ from trellis_edit.inversion.rf_sampler import (
     build_inversion_t_pairs,
     resolve_inversion_steps,
 )
+from trellis_edit.composable.runtime import (
+    PredictorStepResult,
+    RefinementResult,
+    SourceTrace,
+    StepContext,
+)
 from trellis_edit.samplers import SparseLatentBlendMask, blend_sparse_features
 from trellis_edit.utils import build_image_token_metadata, resolve_patch_size
 from trellis_edit.utils.uniedit_utils import coords_to_flat_indices
 
 
-class P2PLatentBlendCommonMixin:
-    """Shared helpers for composable P2P stages; blending stays stage-configurable."""
+@dataclass(frozen=True)
+class SolverEvalSpec:
+    actual_t: float
+    logical_t: float
+    eval_idx: int
+
+
+class ControlledDenoiseCommonMixin:
+    """Shared helpers for controlled-denoise stages with optional stage controls."""
 
     _STAGE_DEFAULTS = {
         "ss": (1.0, 0.3, 1.0),
         "slat": (0.8, 0.0, 1.0),
     }
+    _SUPPORTED_SOLVER_MODES = {"simple", "rf_solver", "voxhammer_rf_solver"}
+    _RF_FAMILY_SOLVER_MODES = {"rf_solver", "voxhammer_rf_solver"}
 
     @classmethod
     def _validate_stage_list(cls, stages: Iterable[str]) -> list[str]:
@@ -48,6 +64,27 @@ class P2PLatentBlendCommonMixin:
             raise ValueError("enabled_stages cannot be empty")
 
         return validated
+
+    @classmethod
+    def _validate_solver_mode(cls, solver_mode: str) -> str:
+        if solver_mode not in cls._SUPPORTED_SOLVER_MODES:
+            valid = ", ".join(sorted(cls._SUPPORTED_SOLVER_MODES))
+            raise ValueError(f"Unknown solver_mode: {solver_mode!r}. Expected one of: {valid}")
+        return solver_mode
+
+    @classmethod
+    def _is_rf_family_solver(cls, solver_mode: str) -> bool:
+        cls._validate_solver_mode(solver_mode)
+        return solver_mode in cls._RF_FAMILY_SOLVER_MODES
+
+    @classmethod
+    def _solver_display_name(cls, solver_mode: str) -> str:
+        cls._validate_solver_mode(solver_mode)
+        if solver_mode == "simple":
+            return "simple Euler"
+        if solver_mode == "rf_solver":
+            return "RF-Solver"
+        return "VoxHammer RF-Solver"
 
     def _create_p2p_hook(
         self,
@@ -432,19 +469,23 @@ class P2PLatentBlendCommonMixin:
         self,
         mask_coords: torch.Tensor,
         *,
+        source_coords: torch.Tensor | None = None,
         resolution: int,
         latent_resolution: int,
         hard_mask_mode: str = "edit_all",
+        edit_region_mode: str = "mask_only",
         soft_mask_enabled: bool = False,
         soft_mask_dilation: int = 2,
         soft_mask_sigma: float = 1.0,
     ) -> torch.Tensor:
         latent_mask = self._build_ss_latent_mask(
             mask_coords,
+            source_coords=source_coords,
             resolution=resolution,
             channels=1,
             latent_resolution=latent_resolution,
             hard_mask_mode=hard_mask_mode,
+            edit_region_mode=edit_region_mode,
             soft_mask_enabled=soft_mask_enabled,
             soft_mask_dilation=soft_mask_dilation,
             soft_mask_sigma=soft_mask_sigma,
@@ -520,29 +561,186 @@ class P2PLatentBlendCommonMixin:
             return sample.device
         return sample.coords.device
 
+    @staticmethod
+    def _resolve_solver_logical_t(
+        *,
+        phase: str | None,
+        t_curr: float,
+        t_next: float,
+    ) -> float:
+        if phase == "inversion":
+            return float(t_next)
+        return float(t_curr)
+
+    def _build_predictor_eval_specs(
+        self,
+        *,
+        step_ctx: StepContext,
+        solver_mode: str,
+    ) -> list[SolverEvalSpec]:
+        self._validate_solver_mode(solver_mode)
+
+        dt = float(step_ctx.t_next - step_ctx.t_curr)
+        eval_specs = [
+            SolverEvalSpec(
+                actual_t=float(step_ctx.t_curr),
+                logical_t=float(step_ctx.logical_t),
+                eval_idx=1,
+            )
+        ]
+        if self._is_rf_family_solver(solver_mode):
+            eval_specs.append(
+                SolverEvalSpec(
+                    actual_t=float(step_ctx.t_curr + 0.5 * dt),
+                    logical_t=float(step_ctx.logical_t),
+                    eval_idx=2,
+                )
+            )
+        return eval_specs
+
+    def _build_refinement_eval_specs(
+        self,
+        *,
+        step_ctx: StepContext,
+        predictor_eval_count: int,
+        refinement_steps: int,
+    ) -> list[SolverEvalSpec]:
+        eval_specs: list[SolverEvalSpec] = []
+        for offset in range(int(refinement_steps)):
+            eval_specs.append(
+                SolverEvalSpec(
+                    actual_t=float(step_ctx.t_next),
+                    logical_t=float(step_ctx.logical_t),
+                    eval_idx=predictor_eval_count + offset + 1,
+                )
+            )
+        return eval_specs
+
     def _predict_with_optional_cfg(
         self,
         model,
         sample,
-        t_value: float,
         cond_dict: Dict[str, Any],
         cfg_strength: float,
         cfg_interval: Tuple[float, float],
         *,
+        eval_spec: SolverEvalSpec,
         hook: Any | None = None,
         phase: str | None = None,
-        cache_t_value: float | None = None,
     ):
+        actual_t = float(eval_spec.actual_t)
+        logical_t = float(eval_spec.logical_t)
         device = self._sample_device(sample)
-        t_tensor = torch.tensor([1000 * t_value], device=device, dtype=torch.float32)
-        if hook is not None and hasattr(hook, "set_phase"):
-            hook.set_phase(phase, cache_t_norm=cache_t_value)
-        pred = model(sample, t_tensor, cond_dict["cond"])
-        if cfg_strength <= 0.0 or not (cfg_interval[0] <= t_value <= cfg_interval[1]):
-            return pred
+        t_tensor = torch.tensor([1000 * actual_t], device=device, dtype=torch.float32)
+        if hook is not None and hasattr(hook, "set_eval_context"):
+            hook.set_eval_context(phase, eval_spec=eval_spec)
+        try:
+            pred = model(sample, t_tensor, cond_dict["cond"])
+            if cfg_strength <= 0.0 or not (cfg_interval[0] <= logical_t <= cfg_interval[1]):
+                return pred
 
-        neg_pred = model(sample, t_tensor, cond_dict["neg_cond"])
-        return pred + cfg_strength * (pred - neg_pred)
+            neg_pred = model(sample, t_tensor, cond_dict["neg_cond"])
+            return pred + cfg_strength * (pred - neg_pred)
+        finally:
+            if hook is not None and hasattr(hook, "set_eval_context"):
+                hook.set_eval_context(None, eval_spec=None)
+
+    def _predictor_step(
+        self,
+        model,
+        sample,
+        cond_dict: Dict[str, Any],
+        *,
+        step_ctx: StepContext,
+        cfg_strength: float,
+        cfg_interval: Tuple[float, float],
+        solver_mode: str,
+        hook: Any | None = None,
+    ) -> PredictorStepResult:
+        self._validate_solver_mode(solver_mode)
+
+        eval_specs = self._build_predictor_eval_specs(
+            step_ctx=step_ctx,
+            solver_mode=solver_mode,
+        )
+        pred_v = self._predict_with_optional_cfg(
+            model,
+            sample,
+            cond_dict,
+            cfg_strength=cfg_strength,
+            cfg_interval=cfg_interval,
+            eval_spec=eval_specs[0],
+            hook=hook,
+            phase=step_ctx.phase,
+        )
+        dt = float(step_ctx.t_next - step_ctx.t_curr)
+        if solver_mode == "simple":
+            return PredictorStepResult(x_pred=sample + dt * pred_v)
+
+        sample_mid = sample + 0.5 * dt * pred_v
+        pred_v_mid = self._predict_with_optional_cfg(
+            model,
+            sample_mid,
+            cond_dict,
+            cfg_strength=cfg_strength,
+            cfg_interval=cfg_interval,
+            eval_spec=eval_specs[1],
+            hook=hook,
+            phase=step_ctx.phase,
+        )
+        first_order = (pred_v_mid - pred_v) / (0.5 * dt)
+        if solver_mode == "rf_solver":
+            x_pred = sample + dt * pred_v + 0.5 * (dt ** 2) * first_order
+        else:
+            x_pred = sample + dt * pred_v - 0.5 * (dt ** 2) * first_order
+        return PredictorStepResult(x_pred=x_pred)
+
+    def _refine_step(
+        self,
+        model,
+        sample,
+        predictor_result: PredictorStepResult,
+        cond_dict: Dict[str, Any],
+        *,
+        step_ctx: StepContext,
+        cfg_strength: float,
+        cfg_interval: Tuple[float, float],
+        solver_mode: str,
+        predictor_corrector_steps: int,
+        hook: Any | None = None,
+    ) -> RefinementResult:
+        self._validate_solver_mode(solver_mode)
+
+        if predictor_corrector_steps <= 0:
+            return RefinementResult(x_next=predictor_result.x_pred)
+
+        eval_specs = self._build_refinement_eval_specs(
+            step_ctx=step_ctx,
+            predictor_eval_count=len(
+                self._build_predictor_eval_specs(step_ctx=step_ctx, solver_mode=solver_mode)
+            ),
+            refinement_steps=predictor_corrector_steps,
+        )
+
+        # UniInv-style correction is an inversion-only refinement axis:
+        # start from the predictor result at t_next, then repeatedly
+        # re-evaluate a denoising-like velocity at t_next and update the
+        # same step from the original low-noise state.
+        corrected_sample = predictor_result.x_pred
+        dt = float(step_ctx.t_next - step_ctx.t_curr)
+        for eval_spec in eval_specs:
+            corrected_v = self._predict_with_optional_cfg(
+                model,
+                corrected_sample,
+                cond_dict,
+                cfg_strength=cfg_strength,
+                cfg_interval=cfg_interval,
+                eval_spec=eval_spec,
+                hook=hook,
+                phase=step_ctx.phase,
+            )
+            corrected_sample = sample + dt * corrected_v
+        return RefinementResult(x_next=corrected_sample)
 
     def _invert_sample(
         self,
@@ -556,9 +754,8 @@ class P2PLatentBlendCommonMixin:
         inversion_mode: str,
         return_terminal_noise: bool = False,
         hook: Any | None = None,
-    ) -> Dict[str, Any] | tuple[Dict[str, Any], Any]:
-        if inversion_mode not in {"simple", "rf_solver"}:
-            raise ValueError(f"Unknown inversion_mode: {inversion_mode}")
+    ) -> SourceTrace | tuple[SourceTrace, Any]:
+        self._validate_solver_mode(inversion_mode)
 
         extra = config.extra_params or {}
         inversion_cfg = self._resolve_inversion_cfg(stage_prefix, extra)
@@ -570,111 +767,84 @@ class P2PLatentBlendCommonMixin:
             inversion_steps=inversion_steps,
         )
 
-        latent_cache = {}
+        source_trace = SourceTrace()
 
         with torch.inference_mode():
             for i, (t_curr, t_next) in enumerate(t_pairs):
+                step_ctx = StepContext(
+                    stage=stage_prefix,
+                    phase="inversion",
+                    step_index=i,
+                    t_curr=float(t_curr),
+                    t_next=float(t_next),
+                    logical_t=self._resolve_solver_logical_t(
+                        phase="inversion",
+                        t_curr=t_curr,
+                        t_next=t_next,
+                    ),
+                )
                 sample = self._sample_with_solver(
                     model,
                     sample,
-                    t_curr,
-                    t_next,
                     cond_dict,
+                    step_ctx=step_ctx,
                     cfg_strength=inversion_cfg["cfg_strength"],
                     cfg_interval=inversion_cfg["cfg_interval"],
                     solver_mode=inversion_mode,
                     predictor_corrector_steps=predictor_corrector_steps,
                     hook=hook,
-                    phase="inversion",
                 )
-                latent_cache[f"{float(t_next)}"] = sample.cpu()
+                source_trace.add_entry(
+                    step_index=i,
+                    logical_t=step_ctx.logical_t,
+                    sample=sample.cpu(),
+                )
 
                 if i % 5 == 0 and torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
         if return_terminal_noise:
-            return latent_cache, sample
-        return latent_cache
+            return source_trace, sample
+        return source_trace
 
     def _sample_with_solver(
         self,
         model,
         sample,
-        t_curr: float,
-        t_next: float,
         cond_dict: Dict[str, Any],
         *,
+        step_ctx: StepContext,
         cfg_strength: float,
         cfg_interval: Tuple[float, float],
         solver_mode: str,
         predictor_corrector_steps: int,
         hook: Any | None = None,
-        phase: str | None = None,
     ):
-        if solver_mode not in {"simple", "rf_solver"}:
-            raise ValueError(f"Unknown solver_mode: {solver_mode}")
+        self._validate_solver_mode(solver_mode)
 
-        hook_cache_t_value = None
-        if phase == "inversion" and solver_mode == "simple":
-            # Keep 1st-order KV cache aligned with latent_cache[t_next], so the
-            # first denoising step can read the cached 1.0 state.
-            hook_cache_t_value = t_next
-
-        pred_v = self._predict_with_optional_cfg(
+        predictor_result = self._predictor_step(
             model,
             sample,
-            t_curr,
             cond_dict,
+            step_ctx=step_ctx,
             cfg_strength=cfg_strength,
             cfg_interval=cfg_interval,
+            solver_mode=solver_mode,
             hook=hook,
-            phase=phase,
-            cache_t_value=hook_cache_t_value,
         )
-        dt = t_next - t_curr
-        if solver_mode == "simple":
-            next_sample = sample + dt * pred_v
-        else:
-            # Use one shared RF step for inversion and denoising. With
-            # first_order := (pred_mid - pred_v) / (0.5 * dt), the Taylor
-            # correction enters with a plus sign.
-            sample_mid = sample + 0.5 * dt * pred_v
-            pred_v_mid = self._predict_with_optional_cfg(
-                model,
-                sample_mid,
-                t_curr + 0.5 * dt,
-                cond_dict,
-                cfg_strength=cfg_strength,
-                cfg_interval=cfg_interval,
-                hook=hook,
-                phase=phase,
-                cache_t_value=hook_cache_t_value,
-            )
-            first_order = (pred_v_mid - pred_v) / (0.5 * dt)
-            next_sample = sample + dt * pred_v + 0.5 * (dt ** 2) * first_order
-
-        if predictor_corrector_steps <= 0:
-            return next_sample
-
-        # UniInv-style correction is an inversion-only refinement axis:
-        # start from the predictor result at t_next, then repeatedly
-        # re-evaluate a denoising-like velocity at t_next and update the
-        # same step from the original low-noise state.
-        corrected_sample = next_sample
-        for _ in range(predictor_corrector_steps):
-            corrected_v = self._predict_with_optional_cfg(
-                model,
-                corrected_sample,
-                t_next,
-                cond_dict,
-                cfg_strength=cfg_strength,
-                cfg_interval=cfg_interval,
-                hook=hook,
-                phase=phase,
-                cache_t_value=t_next,
-            )
-            corrected_sample = sample + dt * corrected_v
-        return corrected_sample
+        refinement_result = self._refine_step(
+            model,
+            sample,
+            predictor_result,
+            cond_dict,
+            step_ctx=step_ctx,
+            cfg_strength=cfg_strength,
+            cfg_interval=cfg_interval,
+            solver_mode=solver_mode,
+            predictor_corrector_steps=predictor_corrector_steps,
+            hook=hook,
+        )
+        return refinement_result.x_next
 
     def _prepare_ss_latent_from_coords(
         self,
@@ -685,8 +855,8 @@ class P2PLatentBlendCommonMixin:
         config: Any,
         resolution: int,
         hook: Any | None = None,
-    ) -> Dict[str, torch.Tensor]:
-        latent_cache, _ = self._prepare_ss_latent_and_terminal_from_coords(
+    ) -> SourceTrace:
+        source_trace, _ = self._prepare_ss_latent_and_terminal_from_coords(
             pipeline,
             source_coords,
             source_cond_dict,
@@ -695,7 +865,7 @@ class P2PLatentBlendCommonMixin:
             resolution,
             hook=hook,
         )
-        return latent_cache
+        return source_trace
 
     def _prepare_ss_latent_and_terminal_from_coords(
         self,
@@ -706,12 +876,12 @@ class P2PLatentBlendCommonMixin:
         config: Any,
         resolution: int,
         hook: Any | None = None,
-    ) -> tuple[Dict[str, torch.Tensor], torch.Tensor]:
+    ) -> tuple[SourceTrace, torch.Tensor]:
         if inversion_mode == "none":
             raise ValueError(
                 "inversion_mode='none' is not valid. "
                 "Must do inversion to get per-step latent cache. "
-                "Use 'simple' or 'rf_solver'."
+                "Use 'simple', 'rf_solver', or 'voxhammer_rf_solver'."
             )
 
         from trellis_edit.preprocess.asset_3d import coords_to_voxel
@@ -742,10 +912,12 @@ class P2PLatentBlendCommonMixin:
         self,
         mask_coords: torch.Tensor,
         *,
+        source_coords: torch.Tensor | None = None,
         resolution: int = 64,
         channels: int = 8,
         latent_resolution: int = 16,
         hard_mask_mode: str = "edit_all",
+        edit_region_mode: str = "mask_only",
         soft_mask_enabled: bool = False,
         soft_mask_dilation: int = 2,
         soft_mask_sigma: float = 1.0,
@@ -766,9 +938,27 @@ class P2PLatentBlendCommonMixin:
             device=mask_coords.device,
         )
 
-        if mask_coords.shape[0] > 0:
-            coords_int = mask_coords[:, 1:].long() if mask_coords.shape[1] == 4 else mask_coords.long()
-            voxel_mask[0, 0, coords_int[:, 0], coords_int[:, 1], coords_int[:, 2]] = 1.0
+        mask_coords_int = mask_coords[:, 1:].long() if mask_coords.shape[1] == 4 else mask_coords.long()
+        if edit_region_mode == "mask_only":
+            if mask_coords_int.shape[0] > 0:
+                voxel_mask[0, 0, mask_coords_int[:, 0], mask_coords_int[:, 1], mask_coords_int[:, 2]] = 1.0
+        elif edit_region_mode == "preserve_complement":
+            if source_coords is None:
+                raise RuntimeError(
+                    "SS edit_region_mode='preserve_complement' requires source voxel coordinates."
+                )
+            source_coords_int = (
+                source_coords[:, 1:].long() if source_coords.shape[1] == 4 else source_coords.long()
+            )
+            voxel_mask.fill_(1.0)
+            if source_coords_int.shape[0] > 0:
+                source_codes = coords_to_flat_indices(source_coords_int, resolution=resolution)
+                mask_codes = coords_to_flat_indices(mask_coords_int, resolution=resolution)
+                preserve_coords = source_coords_int[~torch.isin(source_codes, mask_codes)]
+                if preserve_coords.shape[0] > 0:
+                    voxel_mask[0, 0, preserve_coords[:, 0], preserve_coords[:, 1], preserve_coords[:, 2]] = 0.0
+        else:
+            raise ValueError(f"Unknown SS edit_region_mode: {edit_region_mode}")
 
         pooling_stride = resolution // latent_resolution
         if soft_mask_enabled:
@@ -801,6 +991,60 @@ class P2PLatentBlendCommonMixin:
             return pooled_mask.contiguous()
         return pooled_mask.expand(1, channels, latent_resolution, latent_resolution, latent_resolution).contiguous()
 
+    @staticmethod
+    def _trace_sample_to_device(
+        sample: Any,
+        *,
+        device: torch.device,
+        dtype: torch.dtype | None = None,
+    ) -> Any:
+        if torch.is_tensor(sample):
+            return sample.to(device=device, dtype=sample.dtype if dtype is None else dtype)
+        if hasattr(sample, "to"):
+            if dtype is None:
+                return sample.to(device=device)
+            return sample.to(device=device, dtype=dtype)
+        raise TypeError(f"Unsupported source trace sample type: {type(sample)!r}")
+
+    def _prepare_step_source_snapshot(
+        self,
+        *,
+        hook: Any | None,
+        stage_name: str,
+        model,
+        source_trace: SourceTrace | None,
+        source_cond_dict: Dict[str, Any] | None,
+        logical_t: float,
+        cfg_strength: float,
+        cfg_interval: Tuple[float, float],
+    ) -> None:
+        if hook is None or not hasattr(hook, "requires_step_source_snapshot"):
+            return
+        if source_trace is None or source_cond_dict is None:
+            return
+        if not hook.requires_step_source_snapshot(stage_name, logical_t):
+            return
+
+        source_entry = source_trace.get_entry(logical_t)
+        if source_entry is None:
+            return
+
+        device = source_cond_dict["cond"].device
+        source_sample = self._trace_sample_to_device(source_entry.sample, device=device)
+        need_neg = bool(cfg_strength > 0.0 and cfg_interval[0] <= logical_t <= cfg_interval[1])
+        hook.clear_step_source_snapshot(stage_name=stage_name)
+        hook.begin_step_source_capture(stage_name=stage_name, logical_t=logical_t)
+        try:
+            t_tensor = torch.tensor([1000.0 * logical_t], device=device, dtype=torch.float32)
+            model(source_sample, t_tensor, source_cond_dict["cond"])
+            if need_neg:
+                model(source_sample, t_tensor, source_cond_dict["neg_cond"])
+            snapshot = hook.end_step_source_capture(stage_name=stage_name, logical_t=logical_t)
+        except Exception:
+            hook.cancel_step_source_capture(stage_name=stage_name)
+            raise
+        hook.set_step_source_snapshot(stage_name=stage_name, logical_t=logical_t, snapshot=snapshot)
+
     def _denoise_ss_with_step_blend(
         self,
         pipeline,
@@ -808,15 +1052,15 @@ class P2PLatentBlendCommonMixin:
         config: Any,
         *,
         initial_sample: Optional[torch.Tensor] = None,
-        source_latent_cache: Optional[Dict[str, torch.Tensor]] = None,
+        source_trace: SourceTrace | None = None,
+        source_cond_dict: Dict[str, Any] | None = None,
         latent_mask: Optional[torch.Tensor] = None,
         blend_strength: float = 1.0,
         solver_mode: str = "simple",
         verbose: bool = False,
         hook: Any | None = None,
     ) -> torch.Tensor:
-        if solver_mode not in {"simple", "rf_solver"}:
-            raise ValueError(f"Unknown solver_mode: {solver_mode}")
+        self._validate_solver_mode(solver_mode)
 
         extra = config.extra_params or {}
         stage_params = self._resolve_stage_sampler_params(
@@ -871,31 +1115,54 @@ class P2PLatentBlendCommonMixin:
                 "[Denoising] Starting SS denoising "
                 f"(total_steps={steps}, start_step={denoise_start_step}, init={init_mode})"
             )
-
         with torch.no_grad():
             for i, (t_curr, t_next) in enumerate(t_pairs):
+                step_ctx = StepContext(
+                    stage="ss",
+                    phase="denoise",
+                    step_index=i,
+                    t_curr=float(t_curr),
+                    t_next=float(t_next),
+                    logical_t=self._resolve_solver_logical_t(
+                        phase="denoise",
+                        t_curr=t_curr,
+                        t_next=t_next,
+                    ),
+                )
 
-                if source_latent_cache is not None and mask is not None:
-                    source_key = f"{float(t_curr)}"
-                    if source_key in source_latent_cache:
-                        source_latent = source_latent_cache[source_key].to(sample.device, sample.dtype)
+                if source_trace is not None and mask is not None:
+                    source_latent = source_trace.get_sample(step_ctx.logical_t)
+                    if source_latent is not None:
+                        source_latent = source_latent.to(sample.device, sample.dtype)
                         sample = mask * sample + (1 - mask) * (
                             blend_strength * source_latent + (1 - blend_strength) * sample
                         )
 
-                sample = self._sample_with_solver(
-                    flow_model,
-                    sample,
-                    t_curr,
-                    t_next,
-                    edit_cond_dict,
+                self._prepare_step_source_snapshot(
+                    hook=hook,
+                    stage_name="ss",
+                    model=flow_model,
+                    source_trace=source_trace,
+                    source_cond_dict=source_cond_dict,
+                    logical_t=step_ctx.logical_t,
                     cfg_strength=cfg_strength,
                     cfg_interval=cfg_interval,
-                    solver_mode=solver_mode,
-                    predictor_corrector_steps=0,
-                    hook=hook,
-                    phase="denoise",
                 )
+                try:
+                    sample = self._sample_with_solver(
+                        flow_model,
+                        sample,
+                        edit_cond_dict,
+                        step_ctx=step_ctx,
+                        cfg_strength=cfg_strength,
+                        cfg_interval=cfg_interval,
+                        solver_mode=solver_mode,
+                        predictor_corrector_steps=0,
+                        hook=hook,
+                    )
+                finally:
+                    if hook is not None and hasattr(hook, "clear_step_source_snapshot"):
+                        hook.clear_step_source_snapshot(stage_name="ss")
 
                 if i % 5 == 0 and torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -910,14 +1177,14 @@ class P2PLatentBlendCommonMixin:
         *,
         edit_coords,
         initial_sample=None,
-        source_latent_cache: Optional[Dict[str, Any]] = None,
+        source_trace: SourceTrace | None = None,
+        source_cond_dict: Dict[str, Any] | None = None,
         latent_mask: Optional[torch.Tensor | SparseLatentBlendMask] = None,
         solver_mode: str = "simple",
         verbose: bool = False,
         hook: Any | None = None,
     ):
-        if solver_mode not in {"simple", "rf_solver"}:
-            raise ValueError(f"Unknown solver_mode: {solver_mode}")
+        self._validate_solver_mode(solver_mode)
         if int(config.num_samples) != 1:
             raise RuntimeError("Custom SLAT denoising currently supports num_samples=1 only.")
 
@@ -963,29 +1230,51 @@ class P2PLatentBlendCommonMixin:
                 "[Denoising] Starting SLAT denoising "
                 f"(total_steps={steps}, start_step={denoise_start_step}, init={init_mode})"
             )
-
         with torch.no_grad():
             for i, (t_curr, t_next) in enumerate(t_pairs):
+                step_ctx = StepContext(
+                    stage="slat",
+                    phase="denoise",
+                    step_index=i,
+                    t_curr=float(t_curr),
+                    t_next=float(t_next),
+                    logical_t=self._resolve_solver_logical_t(
+                        phase="denoise",
+                        t_curr=t_curr,
+                        t_next=t_next,
+                    ),
+                )
 
-                if source_latent_cache is not None and latent_mask is not None:
-                    source_key = f"{float(t_curr)}"
-                    if source_key in source_latent_cache:
-                        source_latent = source_latent_cache[source_key]
+                if source_trace is not None and latent_mask is not None:
+                    source_latent = source_trace.get_sample(step_ctx.logical_t)
+                    if source_latent is not None:
                         sample, _ = blend_sparse_features(sample, source_latent, latent_mask)
 
-                sample = self._sample_with_solver(
-                    flow_model,
-                    sample,
-                    t_curr,
-                    t_next,
-                    edit_cond_dict,
+                self._prepare_step_source_snapshot(
+                    hook=hook,
+                    stage_name="slat",
+                    model=flow_model,
+                    source_trace=source_trace,
+                    source_cond_dict=source_cond_dict,
+                    logical_t=step_ctx.logical_t,
                     cfg_strength=cfg_strength,
                     cfg_interval=cfg_interval,
-                    solver_mode=solver_mode,
-                    predictor_corrector_steps=0,
-                    hook=hook,
-                    phase="denoise",
                 )
+                try:
+                    sample = self._sample_with_solver(
+                        flow_model,
+                        sample,
+                        edit_cond_dict,
+                        step_ctx=step_ctx,
+                        cfg_strength=cfg_strength,
+                        cfg_interval=cfg_interval,
+                        solver_mode=solver_mode,
+                        predictor_corrector_steps=0,
+                        hook=hook,
+                    )
+                finally:
+                    if hook is not None and hasattr(hook, "clear_step_source_snapshot"):
+                        hook.clear_step_source_snapshot(stage_name="slat")
 
                 if i % 5 == 0 and torch.cuda.is_available():
                     torch.cuda.empty_cache()

@@ -305,13 +305,6 @@ SS_VALIDATION_RULES: tuple[ValidationRule, ...] = (
         ),
         message="{label}.inversion.inversion_steps must be > 0 when set.",
     ),
-    ValidationRule(
-        when=(
-            ConditionSpec("controls.kv_blend.enabled", "eq", True),
-            ConditionSpec("inversion.predictor_corrector_steps", "gt", 0),
-        ),
-        message="{label}.controls.kv_blend does not support predictor_corrector_steps > 0 yet.",
-    ),
 )
 
 
@@ -374,6 +367,10 @@ SLAT_VALIDATION_RULES: tuple[ValidationRule, ...] = (
         message="{label}.postprocess.mode='boundary_band_restore' is only supported for ss.",
     ),
     ValidationRule(
+        when=(ConditionSpec("postprocess.mode", "eq", "restore_all_outside_mask"),),
+        message="{label}.postprocess.mode='restore_all_outside_mask' is only supported for ss.",
+    ),
+    ValidationRule(
         when=(
             ConditionSpec("controls.latent_blend.enabled", "eq", True),
             ConditionSpec("controls.uniedit.enabled", "eq", True),
@@ -421,13 +418,6 @@ SLAT_VALIDATION_RULES: tuple[ValidationRule, ...] = (
         message="{label}.inversion.inversion_steps requires {label}.inversion.enabled=true.",
     ),
     ValidationRule(
-        when=(
-            ConditionSpec("inversion.enabled", "eq", True),
-            ConditionSpec("inversion.denoise_init", "eq", "random_noise"),
-        ),
-        message="{label}.inversion.enabled=true requires denoise_init=terminal_noise.",
-    ),
-    ValidationRule(
         when=(ConditionSpec("inversion.scope", "not_in", {"full_source", "preserve_only"}),),
         message=(
             "{label}.inversion.scope must be one of ('full_source', 'preserve_only'), "
@@ -472,13 +462,6 @@ SLAT_VALIDATION_RULES: tuple[ValidationRule, ...] = (
             ConditionSpec("inversion.inversion_steps", "le", 0),
         ),
         message="{label}.inversion.inversion_steps must be > 0 when set.",
-    ),
-    ValidationRule(
-        when=(
-            ConditionSpec("controls.kv_blend.enabled", "eq", True),
-            ConditionSpec("inversion.predictor_corrector_steps", "gt", 0),
-        ),
-        message="{label}.controls.kv_blend does not support predictor_corrector_steps > 0 yet.",
     ),
 )
 

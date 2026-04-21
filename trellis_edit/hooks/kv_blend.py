@@ -13,10 +13,6 @@ from trellis_edit.utils import signature_distance, tensor_signature
 from .base import AttentionHook
 
 
-def _time_key(t_value: float) -> str:
-    return f"{float(t_value):.10f}"
-
-
 @dataclass(frozen=True)
 class KVBlendStageConfig:
     name: str
@@ -46,18 +42,77 @@ class KVBlendHook(AttentionHook):
         self.neg_cond_signature = tensor_signature(neg_cond)
         self.stage_configs = stage_configs
         self.stage_masks = stage_masks
-        self.cache: Dict[str, Dict[str, Any]] = {stage: {} for stage in stage_configs}
         self.current_phase: Optional[str] = None
-        self.current_cache_t_norm: Optional[float] = None
+        self.current_eval_spec: Optional[Any] = None
+        self.current_source_capture: Optional[dict[str, Any]] = None
         self.current_forward_context: Optional[dict] = None
+        self._pending_step_source_snapshots: Dict[str, Dict[str, Any]] = {}
+        self._active_step_source_snapshots: Dict[str, Dict[str, Any]] = {}
+        self._active_step_source_times: Dict[str, float] = {}
         self._dense_mask_cache: Dict[tuple[str, str, str, int], torch.Tensor] = {}
         self._sparse_mask_cache: Dict[tuple[str, str, str], Any] = {}
 
-    def set_phase(self, phase: Optional[str], *, cache_t_norm: Optional[float] = None) -> None:
+    @staticmethod
+    def _eval_spec_field(eval_spec: Any, field_name: str) -> Any:
+        if isinstance(eval_spec, dict):
+            return eval_spec[field_name]
+        return getattr(eval_spec, field_name)
+
+    def set_eval_context(self, phase: Optional[str], *, eval_spec: Optional[Any] = None) -> None:
         if phase not in {None, "inversion", "denoise"}:
             raise ValueError(f"Unknown KV blend phase: {phase}")
+        if phase is not None and eval_spec is None:
+            raise ValueError("KV blend eval context requires eval_spec when phase is set.")
         self.current_phase = phase
-        self.current_cache_t_norm = cache_t_norm
+        self.current_eval_spec = eval_spec
+
+    def requires_step_source_snapshot(self, stage_name: str, logical_t: float) -> bool:
+        config = self.stage_configs.get(stage_name)
+        if config is None:
+            return False
+        return bool(config.contains(float(logical_t)) and (config.self_attention or config.cross_attention))
+
+    def begin_step_source_capture(self, *, stage_name: str, logical_t: float) -> None:
+        self.current_source_capture = {
+            "stage": stage_name,
+            "logical_t": float(logical_t),
+        }
+        self._pending_step_source_snapshots[stage_name] = {}
+
+    def cancel_step_source_capture(self, *, stage_name: str) -> None:
+        if self.current_source_capture is not None and self.current_source_capture.get("stage") == stage_name:
+            self.current_source_capture = None
+        self._pending_step_source_snapshots.pop(stage_name, None)
+
+    def end_step_source_capture(self, *, stage_name: str, logical_t: float) -> Dict[str, Any]:
+        if self.current_source_capture is None or self.current_source_capture.get("stage") != stage_name:
+            raise RuntimeError(f"No pending KV blend source capture for stage={stage_name!r}.")
+        capture_t = float(self.current_source_capture["logical_t"])
+        if abs(capture_t - float(logical_t)) > 1e-6:
+            raise RuntimeError(
+                f"KV blend source capture logical_t mismatch for stage={stage_name!r}: "
+                f"expected {capture_t}, got {float(logical_t)}"
+            )
+        self.current_source_capture = None
+        return self._pending_step_source_snapshots.pop(stage_name, {})
+
+    def set_step_source_snapshot(
+        self,
+        *,
+        stage_name: str,
+        logical_t: float,
+        snapshot: Dict[str, Any],
+    ) -> None:
+        self._active_step_source_snapshots[stage_name] = snapshot
+        self._active_step_source_times[stage_name] = float(logical_t)
+
+    def clear_step_source_snapshot(self, *, stage_name: str | None = None) -> None:
+        if stage_name is None:
+            self._active_step_source_snapshots.clear()
+            self._active_step_source_times.clear()
+            return
+        self._active_step_source_snapshots.pop(stage_name, None)
+        self._active_step_source_times.pop(stage_name, None)
 
     def patch_model(self, model: torch.nn.Module, stage_name: str) -> None:
         config = self.stage_configs.get(stage_name)
@@ -76,22 +131,26 @@ class KVBlendHook(AttentionHook):
         hook = self
 
         def wrapped_forward(model_self, x, t, cond):
-            if hook.current_phase is None:
+            source_capture = hook.current_source_capture
+            if source_capture is not None and source_capture.get("stage") == stage_name:
+                logical_t = float(source_capture["logical_t"])
+                phase = "source_capture"
+                eval_idx = 0
+            elif hook.current_phase is not None and hook.current_eval_spec is not None:
+                logical_t = float(hook._eval_spec_field(hook.current_eval_spec, "logical_t"))
+                phase = hook.current_phase
+                eval_idx = int(hook._eval_spec_field(hook.current_eval_spec, "eval_idx"))
+            else:
                 return original_forward(x, t, cond)
             t_value = float(t[0].detach().float().cpu().item()) if torch.is_tensor(t) else float(t)
-            actual_t_norm = t_value / 1000.0
-            cache_t_norm = (
-                float(hook.current_cache_t_norm)
-                if hook.current_cache_t_norm is not None
-                else actual_t_norm
-            )
+            actual_t = t_value / 1000.0
             hook.current_forward_context = {
                 "stage": stage_name,
-                "phase": hook.current_phase,
+                "phase": phase,
                 "pass_kind": hook._infer_pass_kind(cond),
-                "t_raw": t_value,
-                "t_norm": actual_t_norm,
-                "cache_t_norm": cache_t_norm,
+                "actual_t": actual_t,
+                "logical_t": logical_t,
+                "eval_idx": eval_idx,
             }
             try:
                 return original_forward(x, t, cond)
@@ -118,25 +177,17 @@ class KVBlendHook(AttentionHook):
         if ctx is None or ctx["stage"] != stage_name:
             return False
         config = self.stage_configs[stage_name]
-        if not config.contains(float(ctx["cache_t_norm"])):
+        if not config.contains(float(ctx["logical_t"])):
             return False
         if attn_type == "self":
             return config.self_attention
         return config.cross_attention
 
-    def _cache_key(self, stage_name: str, layer_idx: int, attn_type: str) -> str:
-        ctx = self.current_forward_context
-        assert ctx is not None
-        return "|".join(
-            (
-                _time_key(ctx["cache_t_norm"]),
-                ctx["pass_kind"],
-                str(layer_idx),
-                attn_type,
-            )
-        )
+    @staticmethod
+    def _snapshot_key(pass_kind: str, layer_idx: int, attn_type: str) -> str:
+        return "|".join((pass_kind, str(layer_idx), attn_type))
 
-    def _cache_dense_kv(
+    def _capture_dense_kv(
         self,
         stage_name: str,
         layer_idx: int,
@@ -144,9 +195,12 @@ class KVBlendHook(AttentionHook):
         k: torch.Tensor,
         v: torch.Tensor,
     ) -> None:
-        key = self._cache_key(stage_name, layer_idx, attn_type)
-        self.cache[stage_name][f"{key}|k"] = k.detach().cpu()
-        self.cache[stage_name][f"{key}|v"] = v.detach().cpu()
+        ctx = self.current_forward_context
+        assert ctx is not None
+        pending_snapshot = self._pending_step_source_snapshots.setdefault(stage_name, {})
+        key = self._snapshot_key(ctx["pass_kind"], layer_idx, attn_type)
+        pending_snapshot[f"{key}|k"] = k.detach().cpu()
+        pending_snapshot[f"{key}|v"] = v.detach().cpu()
 
     def _lookup_dense_kv(
         self,
@@ -156,9 +210,17 @@ class KVBlendHook(AttentionHook):
         device: torch.device,
         dtype: torch.dtype,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[None, None]:
-        key = self._cache_key(stage_name, layer_idx, attn_type)
-        cache_k = self.cache[stage_name].get(f"{key}|k")
-        cache_v = self.cache[stage_name].get(f"{key}|v")
+        ctx = self.current_forward_context
+        assert ctx is not None
+        active_t = self._active_step_source_times.get(stage_name)
+        if active_t is None or abs(active_t - float(ctx["logical_t"])) > 1e-6:
+            return None, None
+        active_snapshot = self._active_step_source_snapshots.get(stage_name)
+        if active_snapshot is None:
+            return None, None
+        key = self._snapshot_key(ctx["pass_kind"], layer_idx, attn_type)
+        cache_k = active_snapshot.get(f"{key}|k")
+        cache_v = active_snapshot.get(f"{key}|v")
         if cache_k is None or cache_v is None:
             return None, None
         return cache_k.to(device=device, dtype=dtype), cache_v.to(device=device, dtype=dtype)
@@ -273,8 +335,10 @@ class KVBlendHook(AttentionHook):
             return k, v
         ctx = self.current_forward_context
         assert ctx is not None
-        if ctx["phase"] == "inversion":
-            self._cache_dense_kv(stage_name, layer_idx, attn_type, k, v)
+        if ctx["phase"] == "source_capture":
+            self._capture_dense_kv(stage_name, layer_idx, attn_type, k, v)
+            return k, v
+        if ctx["phase"] != "denoise":
             return k, v
 
         mask = self._dense_token_mask(stage_name, attn_type, k.device, k.dtype, k.shape[2])
@@ -360,14 +424,21 @@ class KVBlendHook(AttentionHook):
 
             ctx = hook.current_forward_context
             assert ctx is not None
-            if ctx["phase"] == "inversion":
-                hook.cache[stage_name][f"{hook._cache_key(stage_name, layer_idx, 'self')}|k_sparse"] = k.cpu()
-                hook.cache[stage_name][f"{hook._cache_key(stage_name, layer_idx, 'self')}|v_sparse"] = v.cpu()
-            else:
+            if ctx["phase"] == "source_capture":
+                snapshot = hook._pending_step_source_snapshots.setdefault(stage_name, {})
+                key = hook._snapshot_key(ctx["pass_kind"], layer_idx, "self")
+                snapshot[f"{key}|k_sparse"] = k.cpu()
+                snapshot[f"{key}|v_sparse"] = v.cpu()
+            elif ctx["phase"] == "denoise":
                 sparse_mask = hook._sparse_self_mask(stage_name, x.coords.device)
-                cache_key = hook._cache_key(stage_name, layer_idx, "self")
-                cached_k = hook.cache[stage_name].get(f"{cache_key}|k_sparse")
-                cached_v = hook.cache[stage_name].get(f"{cache_key}|v_sparse")
+                cached_k = None
+                cached_v = None
+                active_t = hook._active_step_source_times.get(stage_name)
+                active_snapshot = hook._active_step_source_snapshots.get(stage_name)
+                if active_t is not None and abs(active_t - float(ctx["logical_t"])) <= 1e-6 and active_snapshot is not None:
+                    cache_key = hook._snapshot_key(ctx["pass_kind"], layer_idx, "self")
+                    cached_k = active_snapshot.get(f"{cache_key}|k_sparse")
+                    cached_v = active_snapshot.get(f"{cache_key}|v_sparse")
                 preserve_coords, edit_weights = hook._resolve_sparse_self_mask(sparse_mask)
                 if preserve_coords is not None and cached_k is not None and cached_v is not None:
                     k = hook._blend_sparse_tensor(k, cached_k, preserve_coords, edit_weights)

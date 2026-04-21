@@ -14,6 +14,7 @@ from tqdm import tqdm
 from easydict import EasyDict as edict
 
 from trellis.pipelines.samplers.flow_euler import FlowEulerGuidanceIntervalSampler
+from trellis_edit.composable.runtime import SourceTrace
 
 
 @dataclass(frozen=True)
@@ -99,29 +100,27 @@ class LatentBlendFlowEulerSampler(FlowEulerGuidanceIntervalSampler):
         super().__init__(sigma_min)
 
         # Blending state
-        self.source_latent_cache: Optional[Dict[str, Any]] = None  # Cache of latents at each timestep
+        self.source_trace: Optional[SourceTrace] = None  # Canonical source trace at each logical timestep
         self.latent_mask: Optional[torch.Tensor | SparseLatentBlendMask] = None  # Blending mask
         self.blend_enabled: bool = False
         self.is_sparse: bool = False  # True for SLAT stage, False for SS stage
 
     def set_blend_source(
         self,
-        source_latent_cache: Dict[str, Any],
+        source_trace: SourceTrace,
         latent_mask: torch.Tensor | SparseLatentBlendMask,
         is_sparse: bool = False,
     ):
         """Set source latent cache and mask for blending.
 
         Args:
-            source_latent_cache: Dict mapping timestep to latent
-                - Key format: f"{t}" where t is normalized timestep (0-1)
-                - Value: latent tensor at that timestep
+            source_trace: Canonical source trace keyed by logical timestep
             latent_mask: Blending mask
                 - SS stage: Tensor [B, C, D, H, W], 0=preserve source, 1=use edit
                 - SLAT stage: Tensor [N_preserve, 4] or SparseLatentBlendMask
             is_sparse: True for SLAT stage, False for SS stage
         """
-        self.source_latent_cache = source_latent_cache
+        self.source_trace = source_trace
         self.latent_mask = latent_mask
         self.blend_enabled = True
         self.is_sparse = is_sparse
@@ -140,7 +139,7 @@ class LatentBlendFlowEulerSampler(FlowEulerGuidanceIntervalSampler):
     def disable_blend(self):
         """Disable blending."""
         self.blend_enabled = False
-        self.source_latent_cache = None
+        self.source_trace = None
         self.latent_mask = None
 
     def _blend_latent(self, sample: Any, t_norm: float) -> Any:
@@ -153,16 +152,12 @@ class LatentBlendFlowEulerSampler(FlowEulerGuidanceIntervalSampler):
         Returns:
             Blended latent
         """
-        if not self.blend_enabled or self.source_latent_cache is None:
+        if not self.blend_enabled or self.source_trace is None:
             return sample
 
-        # Get cached source latent at this timestep
-        t_key = f"{t_norm}"
-        if t_key not in self.source_latent_cache:
-            # No cached latent at this timestep, skip blending
+        source_latent = self.source_trace.get_sample(t_norm)
+        if source_latent is None:
             return sample
-
-        source_latent = self.source_latent_cache[t_key]
 
         if self.is_sparse:
             # SLAT stage: Sparse feature blending (Eq. 5)
