@@ -7,9 +7,9 @@ import json
 import time
 from pathlib import Path
 
+from trellis_edit.alignment import export_ultrashape_refine_glb_to_canonical_space
 from trellis_edit.common import (
     ensure_dir,
-    export_aligned_glb_to_reference,
     release_cuda_memory,
     utc_now_iso,
     write_json,
@@ -25,6 +25,7 @@ from trellis_edit.common.external_3d import (
     prepare_rgba_image,
     quick_convert_with_obj2gltf,
     requested_device_from_env,
+    set_seed,
     setup_external_3d_imports,
     ultrashape_refine_to_mesh,
     write_temp_obj_dir,
@@ -39,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Run a single UltraShape direct-edit smoke case with Hunyuan2.1 coarse generation and "
-            "Hunyuan2.1 paint material synthesis, then export a reference-aligned textured edit.glb."
+            "Hunyuan2.1 paint material synthesis, then export a canonically aligned textured edit.glb."
         ),
     )
     parser.add_argument("--gt-root", type=Path, default=DEFAULT_GT_ROOT)
@@ -114,6 +115,7 @@ def main() -> None:
         "hunyuan_model": args.hunyuan_model,
         "ultrashape_config": str(args.ultrashape_config),
         "ultrashape_ckpt": str(args.ultrashape_ckpt),
+        "seed": int(args.seed),
         "ultrashape_steps": int(args.steps),
         "ultrashape_num_latents": int(args.num_latents),
         "ultrashape_chunk_size": int(args.chunk_size),
@@ -140,6 +142,7 @@ def main() -> None:
             image = prepare_rgba_image(edit_image_path, shape_bundle["background_remover"])
 
             coarse_started = time.time()
+            set_seed(args.seed)
             coarse_mesh = shape_bundle["shape_pipeline"](image=image)[0]
             coarse_mesh.export(coarse_white_mesh_path)
             run_payload["coarse_shape_seconds"] = round(time.time() - coarse_started, 3)
@@ -199,9 +202,8 @@ def main() -> None:
         run_payload["textured_glb_path"] = str(textured_glb_path)
 
         postprocess_started = time.time()
-        postprocess = export_aligned_glb_to_reference(
+        postprocess = export_ultrashape_refine_glb_to_canonical_space(
             input_glb=textured_glb_path,
-            reference_glb=reference_glb,
             output_glb=edit_glb_path,
             apply_matte_nonmetal=not args.keep_materials,
             drop_normal=args.drop_normal,

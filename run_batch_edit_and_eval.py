@@ -42,7 +42,7 @@ from trellis_edit.utils.voxel_mesh_converter import (
 
 
 DEFAULT_GT_ROOT = Path("/home/wangxinxing/code/Edit3Dpp/data")
-DEFAULT_PRED_ROOT = Path("/cache/wangxinxing/data/temp")
+DEFAULT_PRED_DIRNAME = "pred"
 DEFAULT_METRICS = [
     "psnr",
     "ssim",
@@ -71,7 +71,6 @@ INPUT_KEYS = (
     "source_features",
     "edited_coords",
 )
-
 
 @dataclass(frozen=True)
 class PreparedCaseRun:
@@ -383,7 +382,7 @@ def build_case_config(
     runtime["case_name"] = case_name
     runtime["output_root"] = str(work_root)
     if seed_override is not None:
-        runtime["seed"] = seed_override
+        runtime["seed"] = int(seed_override)
     runtime.setdefault("seed", 1)
     if device_override:
         runtime["device"] = device_override
@@ -1024,7 +1023,7 @@ def run_editing_and_eval(
     seed_override: int | None,
     dry_run: bool,
 ) -> tuple[bool, dict[str, Any] | None]:
-    if not skip_exists and pred_root.exists():
+    if not dry_run and not skip_exists and pred_root.exists():
         print(f"[INFO] 清理旧的输出目录: {pred_root}")
         shutil.rmtree(pred_root)
     ensure_dir(pred_root)
@@ -1193,14 +1192,14 @@ def main() -> int:
     object_name = args.object or batch_config.get("object")
     prompt_id = args.prompt_id or batch_config.get("prompt_id")
     max_cases = args.max_cases if args.max_cases is not None else batch_config.get("max_cases")
+    benchmark_root_text = args.benchmark_root or batch_config.get("benchmark_root")
+    benchmark_root = Path(benchmark_root_text).expanduser().resolve() if benchmark_root_text else DEFAULT_BENCHMARK_ROOT
     assets_root_text = args.assets_root or batch_config.get("assets_root")
     assets_root = Path(assets_root_text).expanduser().resolve() if assets_root_text else None
     pred_root_text = args.pred_root or batch_config.get("pred_root")
     pred_root = Path(pred_root_text).expanduser().resolve() if pred_root_text else (
-        DEFAULT_PRED_ROOT / f"{entrypoint_name}_{config_name}"
+        benchmark_root / DEFAULT_PRED_DIRNAME / f"{entrypoint_name}_{config_name}"
     ).resolve()
-    benchmark_root_text = args.benchmark_root or batch_config.get("benchmark_root")
-    benchmark_root = Path(benchmark_root_text).expanduser().resolve() if benchmark_root_text else DEFAULT_BENCHMARK_ROOT
     metrics = args.metrics or batch_config.get("metrics") or DEFAULT_METRICS
     device = args.device or config_data.get("runtime", {}).get("device") or batch_config.get("device") or "cuda:0"
     gpu_ids = parse_gpu_list(args.gpus or batch_config.get("gpus"), fallback_device=device)

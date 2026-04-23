@@ -6,6 +6,7 @@ import gc
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 import traceback
@@ -39,12 +40,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--benchmark-root", type=Path, default=None)
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL)
     parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument("--render-gpus", type=str, default="", help="Comma-separated GPU ids for benchmark rendering.")
+    parser.add_argument(
+        "--gpus",
+        type=str,
+        default="",
+        help="Comma-separated GPU ids used for generation sharding and, by default, benchmark rendering.",
+    )
+    parser.add_argument(
+        "--render-gpus",
+        type=str,
+        default="",
+        help="Comma-separated GPU ids for benchmark rendering. Defaults to --gpus when provided.",
+    )
     parser.add_argument("--eval-device", type=str, default="", help="Evaluation device, defaults to --device.")
     parser.add_argument("--limit", type=int, default=300, help="Number of prompt-level cases to include.")
     parser.add_argument("--metrics", nargs="+", default=list(DEFAULT_METRICS))
     parser.add_argument("--config-name", type=str, default="baseline_trellis2_edit_image_direct")
-    parser.add_argument("--run-group", type=str, default="baseline")
+    parser.add_argument("--run-group", type=str, default="basic_baselines")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--num-samples", type=int, default=1)
     parser.add_argument(
@@ -112,7 +124,7 @@ def _ensure_trellis2_import_path() -> None:
         sys.path.insert(0, trellis2_path)
 
 
-def _default_render_gpu_ids(device: str) -> list[str]:
+def _default_gpu_ids(device: str) -> list[str]:
     visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
     if visible_devices:
         return [item.strip() for item in visible_devices.split(",") if item.strip()]
@@ -121,10 +133,19 @@ def _default_render_gpu_ids(device: str) -> list[str]:
     return []
 
 
-def _parse_render_gpu_ids(raw_value: str, *, device: str) -> list[str]:
+def _parse_gpu_ids(raw_value: str, *, device: str) -> list[str]:
     if not raw_value.strip():
-        return _default_render_gpu_ids(device)
+        return _default_gpu_ids(device)
     return [item.strip() for item in raw_value.split(",") if item.strip()]
+
+
+def _default_eval_device(*, requested_device: str, raw_gpu_ids: str, explicit_eval_device: str) -> str:
+    if explicit_eval_device:
+        return explicit_eval_device
+    gpu_ids = _parse_gpu_ids(raw_gpu_ids, device=requested_device)
+    if raw_gpu_ids.strip() and gpu_ids:
+        return f"cuda:{gpu_ids[0]}"
+    return requested_device
 
 
 def _load_benchmark_metadata(gt_root: Path) -> list[dict[str, Any]]:
@@ -537,6 +558,237 @@ def _generate_case(
     }
 
 
+def _existing_case_result(
+    *,
+    gt_root: Path,
+    output_root: Path,
+    dataset: str,
+    object_name: str,
+    prompt_id: int,
+) -> dict[str, Any] | None:
+    edit_image_path = gt_root / dataset / object_name / f"prompt_{prompt_id}" / "2d_edit.png"
+    output_glb = output_root / dataset / object_name / f"prompt_{prompt_id}" / "edit.glb"
+    if not output_glb.is_file():
+        return None
+    return {
+        "edit_image": str(edit_image_path),
+        "glb_path": str(output_glb),
+        "resumed": True,
+    }
+
+
+def _shard_state_dir(output_root: Path) -> Path:
+    return output_root / "_shards"
+
+
+def _shard_manifest_path(output_root: Path, *, shard_count: int, shard_index: int) -> Path:
+    if shard_count <= 1:
+        return output_root / "direct_manifest.json"
+    return _shard_state_dir(output_root) / f"direct_manifest_shard_{shard_index:02d}_of_{shard_count:02d}.json"
+
+
+def _shard_failures_path(output_root: Path, *, shard_count: int, shard_index: int) -> Path:
+    if shard_count <= 1:
+        return output_root / "direct_failures.json"
+    return _shard_state_dir(output_root) / f"direct_failures_shard_{shard_index:02d}_of_{shard_count:02d}.json"
+
+
+def _write_manifest_payload(
+    *,
+    manifest_path: Path,
+    config_name: str,
+    run_group: str,
+    model: str,
+    device: str,
+    eval_device: str,
+    generate_gpu_ids: list[str],
+    render_gpu_ids: list[str],
+    seed: int,
+    num_samples: int,
+    quality: str,
+    drop_normal: bool,
+    case_shard_count: int,
+    case_shard_index: int | None,
+    generation_shard_count: int,
+    metrics: list[str],
+    cases: list[tuple[str, str, int]],
+    manifest_cases: dict[str, Any],
+    failed_cases: dict[str, Any],
+) -> None:
+    write_json(
+        manifest_path,
+        {
+            "config_name": config_name,
+            "run_group": run_group,
+            "model": model,
+            "device": device,
+            "eval_device": eval_device,
+            "generate_gpu_ids": generate_gpu_ids,
+            "render_gpu_ids": render_gpu_ids,
+            "seed": seed,
+            "num_samples": num_samples,
+            "quality": quality,
+            "drop_normal": drop_normal,
+            "case_shard_count": case_shard_count,
+            "case_shard_index": case_shard_index,
+            "generation_shard_count": generation_shard_count,
+            "metrics": metrics,
+            "failed_cases": failed_cases,
+            "cases": [
+                {
+                    "dataset": case_dataset,
+                    "object_name": case_object_name,
+                    "prompt_id": case_prompt_id,
+                }
+                for case_dataset, case_object_name, case_prompt_id in cases
+            ],
+            "generated_cases": manifest_cases,
+        },
+    )
+
+
+def _load_json_payload(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _merge_shard_outputs(
+    *,
+    output_root: Path,
+    args: argparse.Namespace,
+    cases: list[tuple[str, str, int]],
+    eval_device: str,
+    generate_gpu_ids: list[str],
+    render_gpu_ids: list[str],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    merged_cases: dict[str, Any] = {}
+    merged_failures: dict[str, Any] = {}
+    shard_count = len(generate_gpu_ids)
+    for shard_index in range(shard_count):
+        manifest_payload = _load_json_payload(
+            _shard_manifest_path(output_root, shard_count=shard_count, shard_index=shard_index)
+        )
+        failure_payload = _load_json_payload(
+            _shard_failures_path(output_root, shard_count=shard_count, shard_index=shard_index)
+        )
+        merged_cases.update(manifest_payload.get("generated_cases") or {})
+        merged_failures.update(manifest_payload.get("failed_cases") or {})
+        merged_failures.update(failure_payload.get("cases") or {})
+
+    manifest_path = output_root / "direct_manifest.json"
+    failures_path = output_root / "direct_failures.json"
+    _write_manifest_payload(
+        manifest_path=manifest_path,
+        config_name=args.config_name,
+        run_group=args.run_group,
+        model=args.model,
+        device=args.device,
+        eval_device=eval_device,
+        generate_gpu_ids=generate_gpu_ids,
+        render_gpu_ids=render_gpu_ids,
+        seed=args.seed,
+        num_samples=args.num_samples,
+        quality=args.quality,
+        drop_normal=bool(args.drop_normal),
+        case_shard_count=1,
+        case_shard_index=None,
+        generation_shard_count=shard_count,
+        metrics=list(args.metrics),
+        cases=cases,
+        manifest_cases=merged_cases,
+        failed_cases=merged_failures,
+    )
+    if merged_failures:
+        write_json(failures_path, {"cases": merged_failures})
+    elif failures_path.exists():
+        failures_path.unlink()
+    return merged_cases, merged_failures
+
+
+def _launch_generation_shards(
+    *,
+    args: argparse.Namespace,
+    gt_root: Path,
+    output_root: Path,
+    generate_gpu_ids: list[str],
+) -> None:
+    shard_count = len(generate_gpu_ids)
+    shard_dir = ensure_dir(_shard_state_dir(output_root))
+    script_path = Path(__file__).resolve()
+    processes: list[tuple[str, subprocess.Popen[str], Any, Path]] = []
+    for shard_index, gpu_id in enumerate(generate_gpu_ids):
+        cmd = [
+            sys.executable,
+            str(script_path),
+            "--gt-root",
+            str(gt_root),
+            "--output-root",
+            str(output_root),
+            "--model",
+            args.model,
+            "--device",
+            "cuda:0",
+            "--limit",
+            str(args.limit),
+            "--config-name",
+            args.config_name,
+            "--run-group",
+            args.run_group,
+            "--seed",
+            str(args.seed),
+            "--num-samples",
+            str(args.num_samples),
+            "--quality",
+            args.quality,
+            "--case-shard-count",
+            str(shard_count),
+            "--case-shard-index",
+            str(shard_index),
+            "--generate-only",
+            "--resume",
+        ]
+        if args.benchmark_root is not None:
+            cmd.extend(["--benchmark-root", str(args.benchmark_root)])
+        if args.metrics:
+            cmd.extend(["--metrics", *args.metrics])
+        if args.continue_on_case_error:
+            cmd.append("--continue-on-case-error")
+        if args.drop_normal:
+            cmd.append("--drop-normal")
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = gpu_id
+        log_path = shard_dir / f"generate_shard_{shard_index:02d}_of_{shard_count:02d}.log"
+        log_handle = open(log_path, "w", encoding="utf-8")
+        process = subprocess.Popen(
+            cmd,
+            cwd=Path.cwd(),
+            env=env,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        processes.append((gpu_id, process, log_handle, log_path))
+        print(
+            f"[Generate] Launch shard {shard_index + 1}/{shard_count} "
+            f"on cuda:{gpu_id} -> {log_path}"
+        )
+
+    failed_logs: list[Path] = []
+    for gpu_id, process, log_handle, log_path in processes:
+        returncode = process.wait()
+        log_handle.close()
+        if returncode != 0:
+            print(f"[Generate] Shard on cuda:{gpu_id} failed -> {log_path}")
+            failed_logs.append(log_path)
+            continue
+        print(f"[Generate] Shard on cuda:{gpu_id} finished")
+
+    if failed_logs:
+        failed_str = "\n".join(str(path) for path in failed_logs)
+        raise RuntimeError(f"Multi-GPU generation failed. Inspect logs:\n{failed_str}")
+
+
 def main() -> None:
     args = build_parser().parse_args()
     if args.case_shard_count < 1:
@@ -554,8 +806,18 @@ def main() -> None:
         if args.benchmark_root is not None
         else (output_root.parent.parent if output_root.parent.name == "pred" else output_root.parent)
     )
-    eval_device = args.eval_device or args.device
-    render_gpu_ids = _parse_render_gpu_ids(args.render_gpus, device=args.device) if not args.generate_only else []
+    generate_gpu_ids = _parse_gpu_ids(args.gpus, device=args.device)
+    if len(generate_gpu_ids) > 1 and args.case_shard_count > 1:
+        raise RuntimeError("Use either --gpus auto-sharding or manual --case-shard-count, not both.")
+    if len(generate_gpu_ids) > 1 and args.max_new_cases > 0:
+        raise RuntimeError("--max-new-cases is not supported with multi-GPU generation orchestration.")
+    eval_device = _default_eval_device(
+        requested_device=args.device,
+        raw_gpu_ids=args.gpus,
+        explicit_eval_device=args.eval_device,
+    )
+    render_gpu_source = args.render_gpus or args.gpus
+    render_gpu_ids = _parse_gpu_ids(render_gpu_source, device=args.device) if not args.generate_only else []
     if not args.generate_only and not render_gpu_ids:
         raise RuntimeError("No render GPUs resolved. Pass --render-gpus or use a cuda device.")
 
@@ -583,13 +845,78 @@ def main() -> None:
             shutil.rmtree(output_root)
     ensure_dir(output_root)
 
-    start_time = time.time()
-    _set_trellis2_env()
-    _ensure_trellis2_import_path()
-    pipeline = _load_pipeline(model_name=args.model, device=args.device)
+    if len(generate_gpu_ids) > 1:
+        print(f"[Generate] Auto-sharding generation across {len(generate_gpu_ids)} GPU(s): {', '.join(generate_gpu_ids)}")
+        _launch_generation_shards(
+            args=args,
+            gt_root=gt_root,
+            output_root=output_root,
+            generate_gpu_ids=generate_gpu_ids,
+        )
+        manifest_cases, failed_cases = _merge_shard_outputs(
+            output_root=output_root,
+            args=args,
+            cases=cases,
+            eval_device=eval_device,
+            generate_gpu_ids=generate_gpu_ids,
+            render_gpu_ids=render_gpu_ids,
+        )
+        if args.generate_only:
+            print(
+                f"[Done] Direct generation saved {len(manifest_cases)}/{len(cases)} cases "
+                f"across {len(generate_gpu_ids)} GPU(s)"
+            )
+            print(f"[Done] Pred root: {output_root}")
+            return
+        if failed_cases:
+            raise RuntimeError("Multi-GPU generation finished with failed cases. Fix them or rerun with --resume.")
+        if len(manifest_cases) < len(cases):
+            raise RuntimeError("Multi-GPU generation did not produce all requested cases.")
+        start_time = time.time()
+        print("[Render] Rendering benchmark views...")
+        if not render_all_results(output_root, gpu_ids=render_gpu_ids, metrics=list(args.metrics)):
+            raise RuntimeError("Benchmark rendering failed.")
 
-    manifest_path = output_root / "direct_manifest.json"
-    failed_cases_path = output_root / "direct_failures.json"
+        print("[Eval] Running benchmark evaluation...")
+        eval_output_dir = ensure_dir(output_root / "evaluation_output")
+        ok, summary = run_evaluation(
+            gt_root=gt_root,
+            pred_root=output_root,
+            metrics=list(args.metrics),
+            output_dir=eval_output_dir,
+            device=eval_device,
+        )
+        if not ok or summary is None:
+            raise RuntimeError("Benchmark evaluation failed.")
+
+        total_time = time.time() - start_time
+        save_results(
+            output_root=output_root,
+            entrypoint_name="baseline",
+            config_name=args.config_name,
+            run_group=args.run_group,
+            gt_root=gt_root,
+            cases=cases,
+            requested_metrics=list(args.metrics),
+            benchmark_root=benchmark_root,
+            skip_benchmark_render=False,
+            results=summary,
+            total_time=total_time,
+        )
+        print(f"[Done] TRELLIS.2 direct-edit benchmark finished in {total_time:.1f}s")
+        print(f"[Done] Pred root: {output_root}")
+        return
+
+    manifest_path = _shard_manifest_path(
+        output_root,
+        shard_count=args.case_shard_count,
+        shard_index=args.case_shard_index,
+    )
+    failed_cases_path = _shard_failures_path(
+        output_root,
+        shard_count=args.case_shard_count,
+        shard_index=args.case_shard_index,
+    )
     manifest_cases: dict[str, Any] = {}
     failed_cases: dict[str, Any] = {}
     if args.resume and manifest_path.is_file():
@@ -600,89 +927,147 @@ def main() -> None:
         existing_failed = json.loads(failed_cases_path.read_text(encoding="utf-8"))
         failed_cases.update(existing_failed.get("cases") or {})
     total_cases = len(shard_cases)
-    print(
-        f"[Shard] case shard {args.case_shard_index}/{args.case_shard_count} "
-        f"selected {total_cases}/{len(cases)} cases"
-    )
-    new_case_count = 0
-    for case_index, (dataset, object_name, prompt_id) in enumerate(shard_cases, start=1):
+    pending_cases: list[tuple[str, str, int]] = []
+    for dataset, object_name, prompt_id in shard_cases:
         case_id = f"{dataset}/{object_name}/prompt_{prompt_id}"
-        print(f"[Direct] {case_index}/{total_cases} {case_id}")
-        try:
-            case_result = _generate_case(
-                pipeline=pipeline,
+        existing_result = None
+        if args.resume:
+            existing_result = _existing_case_result(
                 gt_root=gt_root,
                 output_root=output_root,
                 dataset=dataset,
                 object_name=object_name,
                 prompt_id=prompt_id,
+            )
+        if existing_result is not None:
+            manifest_cases[case_id] = existing_result
+            failed_cases.pop(case_id, None)
+            continue
+        pending_cases.append((dataset, object_name, prompt_id))
+
+    _write_manifest_payload(
+        manifest_path=manifest_path,
+        config_name=args.config_name,
+        run_group=args.run_group,
+        model=args.model,
+        device=args.device,
+        eval_device=eval_device,
+        generate_gpu_ids=generate_gpu_ids,
+        render_gpu_ids=render_gpu_ids,
+        seed=args.seed,
+        num_samples=args.num_samples,
+        quality=args.quality,
+        drop_normal=bool(args.drop_normal),
+        case_shard_count=args.case_shard_count,
+        case_shard_index=args.case_shard_index,
+        generation_shard_count=args.case_shard_count,
+        metrics=list(args.metrics),
+        cases=cases,
+        manifest_cases=manifest_cases,
+        failed_cases=failed_cases,
+    )
+    if failed_cases:
+        write_json(failed_cases_path, {"cases": failed_cases})
+    elif failed_cases_path.exists():
+        failed_cases_path.unlink()
+
+    print(
+        f"[Shard] case shard {args.case_shard_index}/{args.case_shard_count} "
+        f"selected {total_cases}/{len(cases)} cases"
+    )
+    existing_case_count = total_cases - len(pending_cases)
+    if pending_cases:
+        print(f"[Shard] {existing_case_count}/{total_cases} cases already exist")
+    else:
+        print(f"[Shard] {total_cases}/{total_cases} cases already exist")
+    new_case_count = 0
+    if not pending_cases:
+        if args.generate_only:
+            print(
+                f"[Done] Direct generation saved {len(manifest_cases)}/{total_cases} cases "
+                f"(new this run: {new_case_count})"
+            )
+            print(f"[Done] Pred root: {output_root}")
+            return
+        start_time = time.time()
+    else:
+        start_time = time.time()
+        _set_trellis2_env()
+        _ensure_trellis2_import_path()
+        pipeline = _load_pipeline(model_name=args.model, device=args.device)
+
+        completed_offset = existing_case_count
+        for case_index, (dataset, object_name, prompt_id) in enumerate(pending_cases, start=1):
+            case_id = f"{dataset}/{object_name}/prompt_{prompt_id}"
+            print(f"[Direct] {completed_offset + case_index}/{total_cases} {case_id}")
+            try:
+                case_result = _generate_case(
+                    pipeline=pipeline,
+                    gt_root=gt_root,
+                    output_root=output_root,
+                    dataset=dataset,
+                    object_name=object_name,
+                    prompt_id=prompt_id,
+                    seed=args.seed,
+                    num_samples=args.num_samples,
+                    quality=args.quality,
+                    drop_normal=args.drop_normal,
+                )
+            except Exception as exc:
+                failed_cases[case_id] = {
+                    "dataset": dataset,
+                    "object_name": object_name,
+                    "prompt_id": prompt_id,
+                    "error": str(exc),
+                    "traceback": traceback.format_exc(),
+                }
+                write_json(failed_cases_path, {"cases": failed_cases})
+                if not args.continue_on_case_error:
+                    raise
+                print(f"[Skip] {case_id} failed: {exc}")
+                try:
+                    import torch
+
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                continue
+            manifest_cases[case_id] = case_result
+            failed_cases.pop(case_id, None)
+            if not case_result.get("resumed", False):
+                new_case_count += 1
+            if failed_cases:
+                write_json(failed_cases_path, {"cases": failed_cases})
+            elif failed_cases_path.exists():
+                failed_cases_path.unlink()
+            _write_manifest_payload(
+                manifest_path=manifest_path,
+                config_name=args.config_name,
+                run_group=args.run_group,
+                model=args.model,
+                device=args.device,
+                eval_device=eval_device,
+                generate_gpu_ids=generate_gpu_ids,
+                render_gpu_ids=render_gpu_ids,
                 seed=args.seed,
                 num_samples=args.num_samples,
                 quality=args.quality,
-                drop_normal=args.drop_normal,
+                drop_normal=bool(args.drop_normal),
+                case_shard_count=args.case_shard_count,
+                case_shard_index=args.case_shard_index,
+                generation_shard_count=args.case_shard_count,
+                metrics=list(args.metrics),
+                cases=cases,
+                manifest_cases=manifest_cases,
+                failed_cases=failed_cases,
             )
-        except Exception as exc:
-            failed_cases[case_id] = {
-                "dataset": dataset,
-                "object_name": object_name,
-                "prompt_id": prompt_id,
-                "error": str(exc),
-                "traceback": traceback.format_exc(),
-            }
-            write_json(failed_cases_path, {"cases": failed_cases})
-            if not args.continue_on_case_error:
-                raise
-            print(f"[Skip] {case_id} failed: {exc}")
-            try:
-                import torch
-
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except Exception:
-                pass
-            continue
-        manifest_cases[case_id] = case_result
-        failed_cases.pop(case_id, None)
-        if not case_result.get("resumed", False):
-            new_case_count += 1
-        if failed_cases:
-            write_json(failed_cases_path, {"cases": failed_cases})
-        elif failed_cases_path.exists():
-            failed_cases_path.unlink()
-        write_json(
-            manifest_path,
-            {
-                "config_name": args.config_name,
-                "run_group": args.run_group,
-                "model": args.model,
-                "device": args.device,
-                "eval_device": eval_device,
-                "render_gpu_ids": render_gpu_ids,
-                "seed": args.seed,
-                "num_samples": args.num_samples,
-                "quality": args.quality,
-                "drop_normal": bool(args.drop_normal),
-                "case_shard_count": args.case_shard_count,
-                "case_shard_index": args.case_shard_index,
-                "metrics": list(args.metrics),
-                "failed_cases": failed_cases,
-                "cases": [
-                    {
-                        "dataset": case_dataset,
-                        "object_name": case_object_name,
-                        "prompt_id": case_prompt_id,
-                    }
-                    for case_dataset, case_object_name, case_prompt_id in cases
-                ],
-                "generated_cases": manifest_cases,
-            },
-        )
-        if args.max_new_cases > 0 and new_case_count >= args.max_new_cases:
-            print(
-                f"[Stop] Reached max new cases for this run: "
-                f"{new_case_count}/{args.max_new_cases}"
-            )
-            break
+            if args.max_new_cases > 0 and new_case_count >= args.max_new_cases:
+                print(
+                    f"[Stop] Reached max new cases for this run: "
+                    f"{new_case_count}/{args.max_new_cases}"
+                )
+                break
 
     if args.generate_only or len(manifest_cases) < total_cases:
         print(

@@ -21,7 +21,6 @@ from trellis_edit.vecset_benchmark import (
     DEFAULT_BENCHMARK_ROOT,
     DEFAULT_GT_ROOT,
     DEFAULT_METRICS,
-    compare_bbox_alignment,
     ensure_vecset_edit_root,
     load_benchmark_metadata,
     parse_render_gpu_ids,
@@ -35,8 +34,7 @@ DEFAULT_OUTPUT_ROOT = Path("/cache/wangxinxing/data/trellis_edit_benchmark/pred/
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run the local VecSet-Edit benchmark generation, verify that the resulting edit.glb files stay "
-            "aligned to the source_model bbox, then optionally render/evaluate/package the outputs."
+            "Run the local VecSet-Edit benchmark generation, then optionally render/evaluate/package the outputs."
         ),
     )
     parser.add_argument("--gt-root", type=Path, default=DEFAULT_GT_ROOT)
@@ -51,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prompt-id", type=int, default=0)
     parser.add_argument("--metrics", nargs="+", default=list(DEFAULT_METRICS))
     parser.add_argument("--config-name", type=str, default="vecset_edit_local")
-    parser.add_argument("--run-group", type=str, default="baseline")
+    parser.add_argument("--run-group", type=str, default="editing_methods")
     parser.add_argument("--resume", action="store_true", help="Skip prompt outputs that already exist.")
     parser.add_argument(
         "--case-shard-count",
@@ -68,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--generate-only",
         action="store_true",
-        help="Only generate prompt-level edit.glb outputs and alignment reports. Skip render/eval/daily packaging.",
+        help="Only generate prompt-level edit.glb outputs. Skip render/eval/daily packaging.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Print the VecSet command and selected cases without executing.")
     parser.add_argument("--seed", type=int, default=42)
@@ -90,8 +88,6 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("nvdiffrast", "bpy"),
     )
     parser.add_argument("--texture-diff-threshold", type=float, default=0.005)
-    parser.add_argument("--alignment-max-center-delta-ratio", type=float, default=0.05)
-    parser.add_argument("--alignment-max-extent-ratio-deviation", type=float, default=0.15)
     return parser
 
 
@@ -185,69 +181,12 @@ def _load_manifest(path: Path) -> dict[str, Any]:
         return {}
     return json.loads(path.read_text(encoding="utf-8"))
 
-
-def _verify_alignment(
-    *,
-    output_root: Path,
-    gt_root: Path,
-    cases: list[tuple[str, str, int]],
-    max_center_delta_ratio: float,
-    max_extent_ratio_deviation: float,
-) -> dict[str, Any]:
-    per_case: list[dict[str, Any]] = []
-    failed_cases: list[dict[str, Any]] = []
-    for dataset, object_name, prompt_id in cases:
-        source_glb = gt_root / dataset / object_name / "source_model" / "model.glb"
-        edit_glb = output_root / dataset / object_name / f"prompt_{prompt_id}" / "edit.glb"
-        if not edit_glb.is_file():
-            record = {
-                "dataset": dataset,
-                "object_name": object_name,
-                "prompt_id": prompt_id,
-                "source_glb": str(source_glb),
-                "edit_glb": str(edit_glb),
-                "passed": False,
-                "error": "Missing edit.glb",
-            }
-        else:
-            record = {
-                "dataset": dataset,
-                "object_name": object_name,
-                "prompt_id": prompt_id,
-                **compare_bbox_alignment(
-                    reference_glb=source_glb,
-                    candidate_glb=edit_glb,
-                    max_center_delta_ratio=max_center_delta_ratio,
-                    max_extent_ratio_deviation=max_extent_ratio_deviation,
-                ),
-            }
-        per_case.append(record)
-        if not record.get("passed", False):
-            failed_cases.append(record)
-
-    payload = {
-        "num_cases": len(cases),
-        "num_passed_cases": len(per_case) - len(failed_cases),
-        "num_failed_cases": len(failed_cases),
-        "thresholds": {
-            "max_center_delta_ratio": float(max_center_delta_ratio),
-            "max_extent_ratio_deviation": float(max_extent_ratio_deviation),
-        },
-        "cases": per_case,
-        "failed_cases": failed_cases,
-        "created_at": utc_now_iso(),
-    }
-    write_json(output_root / "alignment_summary.json", payload)
-    return payload
-
-
 def _write_summary(
     *,
     output_root: Path,
     args: argparse.Namespace,
     cases: list[tuple[str, str, int]],
     total_seconds: float,
-    alignment_summary: dict[str, Any],
 ) -> dict[str, Any]:
     manifest = _load_manifest(output_root / "manifest.json")
     failed_count = int(manifest.get("failed_count") or 0)
@@ -276,8 +215,6 @@ def _write_summary(
         "object_name": args.object_name or None,
         "prompt_id": int(args.prompt_id) if int(args.prompt_id) > 0 else None,
         "seed": int(args.seed),
-        "alignment_summary_path": str(output_root / "alignment_summary.json"),
-        "alignment_passed": int(alignment_summary.get("num_failed_cases") or 0) == 0,
         "total_seconds": round(float(total_seconds), 3),
         "created_at": utc_now_iso(),
     }
@@ -354,30 +291,11 @@ def main() -> None:
         print("[Done] Dry-run only; no files were generated.")
         return
 
-    alignment_summary = _verify_alignment(
-        output_root=args.output_root,
-        gt_root=args.gt_root,
-        cases=cases,
-        max_center_delta_ratio=float(args.alignment_max_center_delta_ratio),
-        max_extent_ratio_deviation=float(args.alignment_max_extent_ratio_deviation),
-    )
-    print(
-        "[Alignment] "
-        f"passed={alignment_summary['num_passed_cases']} "
-        f"failed={alignment_summary['num_failed_cases']}"
-    )
-    if int(alignment_summary.get("num_failed_cases") or 0) > 0:
-        raise RuntimeError(
-            f"Alignment verification failed for {alignment_summary['num_failed_cases']} cases. "
-            f"See {args.output_root / 'alignment_summary.json'}."
-        )
-
     summary = _write_summary(
         output_root=args.output_root,
         args=args,
         cases=cases,
         total_seconds=time.time() - start_time,
-        alignment_summary=alignment_summary,
     )
     if args.generate_only:
         print(f"[Done] VecSet edit generation prepared: {args.output_root}")

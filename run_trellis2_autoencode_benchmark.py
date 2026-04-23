@@ -48,12 +48,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--benchmark-root", type=Path, default=None)
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL)
     parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument("--render-gpus", type=str, default="", help="Comma-separated GPU ids for benchmark rendering.")
+    parser.add_argument(
+        "--gpus",
+        type=str,
+        default="",
+        help="Comma-separated GPU ids used for reconstruction sharding and, by default, benchmark rendering.",
+    )
+    parser.add_argument(
+        "--render-gpus",
+        type=str,
+        default="",
+        help="Comma-separated GPU ids for benchmark rendering. Defaults to --gpus when provided.",
+    )
     parser.add_argument("--eval-device", type=str, default="", help="Evaluation device, defaults to --device.")
     parser.add_argument("--limit", type=int, default=300, help="Number of prompt-level cases to include.")
     parser.add_argument("--metrics", nargs="+", default=list(DEFAULT_METRICS))
     parser.add_argument("--config-name", type=str, default="baseline_trellis2_autoencode")
-    parser.add_argument("--run-group", type=str, default="baseline")
+    parser.add_argument("--run-group", type=str, default="basic_baselines")
     parser.add_argument(
         "--quality",
         type=str,
@@ -144,7 +155,7 @@ def _release_cuda_memory() -> None:
         return
 
 
-def _default_render_gpu_ids(device: str) -> list[str]:
+def _default_gpu_ids(device: str) -> list[str]:
     visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
     if visible_devices:
         return [item.strip() for item in visible_devices.split(",") if item.strip()]
@@ -153,10 +164,19 @@ def _default_render_gpu_ids(device: str) -> list[str]:
     return []
 
 
-def _parse_render_gpu_ids(raw_value: str, *, device: str) -> list[str]:
+def _parse_gpu_ids(raw_value: str, *, device: str) -> list[str]:
     if not raw_value.strip():
-        return _default_render_gpu_ids(device)
+        return _default_gpu_ids(device)
     return [item.strip() for item in raw_value.split(",") if item.strip()]
+
+
+def _default_eval_device(*, requested_device: str, raw_gpu_ids: str, explicit_eval_device: str) -> str:
+    if explicit_eval_device:
+        return explicit_eval_device
+    gpu_ids = _parse_gpu_ids(raw_gpu_ids, device=requested_device)
+    if raw_gpu_ids.strip() and gpu_ids:
+        return f"cuda:{gpu_ids[0]}"
+    return requested_device
 
 
 def _run_command(cmd: list[str], *, cwd: Path | None = None) -> None:
@@ -590,6 +610,242 @@ def _reconstruct_object(
     }
 
 
+def _existing_object_result(
+    *,
+    gt_root: Path,
+    output_root: Path,
+    dataset: str,
+    object_name: str,
+    prompt_ids: list[int],
+) -> dict[str, Any] | None:
+    object_glb = gt_root / dataset / object_name / "source_model" / "model.glb"
+    object_output_dir = output_root / "_object_recon" / dataset / object_name
+    object_glb_out = object_output_dir / "sample_00.glb"
+    prompt_glb_paths = [
+        output_root / dataset / object_name / f"prompt_{prompt_id}" / "edit.glb"
+        for prompt_id in prompt_ids
+    ]
+    if not object_glb_out.is_file() or not all(path.is_file() for path in prompt_glb_paths):
+        return None
+    return {
+        "source_glb": str(object_glb),
+        "object_output_dir": str(object_output_dir),
+        "glb_path": str(object_glb_out),
+        "prompt_glb_paths": [str(path) for path in prompt_glb_paths],
+        "resumed": True,
+    }
+
+
+def _shard_state_dir(output_root: Path) -> Path:
+    return output_root / "_shards"
+
+
+def _reconstruct_manifest_path(output_root: Path, *, shard_count: int, shard_index: int) -> Path:
+    if shard_count <= 1:
+        return output_root / "reconstruct_manifest.json"
+    return _shard_state_dir(output_root) / f"reconstruct_manifest_shard_{shard_index:02d}_of_{shard_count:02d}.json"
+
+
+def _reconstruct_failures_path(output_root: Path, *, shard_count: int, shard_index: int) -> Path:
+    if shard_count <= 1:
+        return output_root / "reconstruct_failures.json"
+    return _shard_state_dir(output_root) / f"reconstruct_failures_shard_{shard_index:02d}_of_{shard_count:02d}.json"
+
+
+def _write_reconstruct_manifest(
+    *,
+    manifest_path: Path,
+    config_name: str,
+    run_group: str,
+    model: str,
+    device: str,
+    eval_device: str,
+    generate_gpu_ids: list[str],
+    render_gpu_ids: list[str],
+    quality: str,
+    resolution: int,
+    drop_normal: bool,
+    object_shard_count: int,
+    object_shard_index: int | None,
+    generation_shard_count: int,
+    metrics: list[str],
+    cases: list[tuple[str, str, int]],
+    manifest_objects: dict[str, Any],
+    failed_objects: dict[str, Any],
+) -> None:
+    write_json(
+        manifest_path,
+        {
+            "config_name": config_name,
+            "run_group": run_group,
+            "model": model,
+            "device": device,
+            "eval_device": eval_device,
+            "generate_gpu_ids": generate_gpu_ids,
+            "render_gpu_ids": render_gpu_ids,
+            "quality": quality,
+            "resolution": resolution,
+            "drop_normal": drop_normal,
+            "object_shard_count": object_shard_count,
+            "object_shard_index": object_shard_index,
+            "generation_shard_count": generation_shard_count,
+            "metrics": metrics,
+            "cases": [
+                {
+                    "dataset": case_dataset,
+                    "object_name": case_object_name,
+                    "prompt_id": case_prompt_id,
+                }
+                for case_dataset, case_object_name, case_prompt_id in cases
+            ],
+            "objects": manifest_objects,
+            "failed_objects": failed_objects,
+        },
+    )
+
+
+def _load_json_payload(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _merge_shard_outputs(
+    *,
+    output_root: Path,
+    args: argparse.Namespace,
+    cases: list[tuple[str, str, int]],
+    eval_device: str,
+    generate_gpu_ids: list[str],
+    render_gpu_ids: list[str],
+    resolution: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    merged_objects: dict[str, Any] = {}
+    merged_failures: dict[str, Any] = {}
+    shard_count = len(generate_gpu_ids)
+    for shard_index in range(shard_count):
+        manifest_payload = _load_json_payload(
+            _reconstruct_manifest_path(output_root, shard_count=shard_count, shard_index=shard_index)
+        )
+        failure_payload = _load_json_payload(
+            _reconstruct_failures_path(output_root, shard_count=shard_count, shard_index=shard_index)
+        )
+        merged_objects.update(manifest_payload.get("objects") or {})
+        merged_failures.update(manifest_payload.get("failed_objects") or {})
+        merged_failures.update(failure_payload.get("objects") or {})
+
+    manifest_path = output_root / "reconstruct_manifest.json"
+    failures_path = output_root / "reconstruct_failures.json"
+    _write_reconstruct_manifest(
+        manifest_path=manifest_path,
+        config_name=args.config_name,
+        run_group=args.run_group,
+        model=args.model,
+        device=args.device,
+        eval_device=eval_device,
+        generate_gpu_ids=generate_gpu_ids,
+        render_gpu_ids=render_gpu_ids,
+        quality=args.quality,
+        resolution=resolution,
+        drop_normal=bool(args.drop_normal),
+        object_shard_count=1,
+        object_shard_index=None,
+        generation_shard_count=shard_count,
+        metrics=list(args.metrics),
+        cases=cases,
+        manifest_objects=merged_objects,
+        failed_objects=merged_failures,
+    )
+    if merged_failures:
+        write_json(failures_path, {"objects": merged_failures})
+    elif failures_path.exists():
+        failures_path.unlink()
+    return merged_objects, merged_failures
+
+
+def _launch_generation_shards(
+    *,
+    args: argparse.Namespace,
+    gt_root: Path,
+    output_root: Path,
+    generate_gpu_ids: list[str],
+) -> None:
+    shard_count = len(generate_gpu_ids)
+    shard_dir = ensure_dir(_shard_state_dir(output_root))
+    script_path = Path(__file__).resolve()
+    processes: list[tuple[str, subprocess.Popen[str], Any, Path]] = []
+    for shard_index, gpu_id in enumerate(generate_gpu_ids):
+        cmd = [
+            sys.executable,
+            str(script_path),
+            "--gt-root",
+            str(gt_root),
+            "--output-root",
+            str(output_root),
+            "--model",
+            args.model,
+            "--device",
+            "cuda:0",
+            "--limit",
+            str(args.limit),
+            "--config-name",
+            args.config_name,
+            "--run-group",
+            args.run_group,
+            "--quality",
+            args.quality,
+            "--object-shard-count",
+            str(shard_count),
+            "--object-shard-index",
+            str(shard_index),
+            "--generate-only",
+            "--resume",
+        ]
+        if args.benchmark_root is not None:
+            cmd.extend(["--benchmark-root", str(args.benchmark_root)])
+        if args.resolution is not None:
+            cmd.extend(["--resolution", str(args.resolution)])
+        if args.object_list_file is not None:
+            cmd.extend(["--object-list-file", str(args.object_list_file)])
+        if args.metrics:
+            cmd.extend(["--metrics", *args.metrics])
+        if args.continue_on_object_error:
+            cmd.append("--continue-on-object-error")
+        if args.drop_normal:
+            cmd.append("--drop-normal")
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = gpu_id
+        log_path = shard_dir / f"reconstruct_shard_{shard_index:02d}_of_{shard_count:02d}.log"
+        log_handle = open(log_path, "w", encoding="utf-8")
+        process = subprocess.Popen(
+            cmd,
+            cwd=Path.cwd(),
+            env=env,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        processes.append((gpu_id, process, log_handle, log_path))
+        print(
+            f"[Autoencode] Launch shard {shard_index + 1}/{shard_count} "
+            f"on cuda:{gpu_id} -> {log_path}"
+        )
+
+    failed_logs: list[Path] = []
+    for gpu_id, process, log_handle, log_path in processes:
+        returncode = process.wait()
+        log_handle.close()
+        if returncode != 0:
+            print(f"[Autoencode] Shard on cuda:{gpu_id} failed -> {log_path}")
+            failed_logs.append(log_path)
+            continue
+        print(f"[Autoencode] Shard on cuda:{gpu_id} finished")
+
+    if failed_logs:
+        failed_str = "\n".join(str(path) for path in failed_logs)
+        raise RuntimeError(f"Multi-GPU autoencode generation failed. Inspect logs:\n{failed_str}")
+
+
 def main() -> None:
     args = build_parser().parse_args()
     if args.object_shard_count < 1:
@@ -720,8 +976,18 @@ def main() -> None:
         if args.benchmark_root is not None
         else (output_root.parent.parent if output_root.parent.name == "pred" else output_root.parent)
     )
-    eval_device = args.eval_device or args.device
-    render_gpu_ids = _parse_render_gpu_ids(args.render_gpus, device=args.device) if not args.generate_only else []
+    generate_gpu_ids = _parse_gpu_ids(args.gpus, device=args.device)
+    if len(generate_gpu_ids) > 1 and args.object_shard_count > 1:
+        raise RuntimeError("Use either --gpus auto-sharding or manual --object-shard-count, not both.")
+    if len(generate_gpu_ids) > 1 and args.max_new_objects > 0:
+        raise RuntimeError("--max-new-objects is not supported with multi-GPU generation orchestration.")
+    eval_device = _default_eval_device(
+        requested_device=args.device,
+        raw_gpu_ids=args.gpus,
+        explicit_eval_device=args.eval_device,
+    )
+    render_gpu_source = args.render_gpus or args.gpus
+    render_gpu_ids = _parse_gpu_ids(render_gpu_source, device=args.device) if not args.generate_only else []
     if not args.generate_only and not render_gpu_ids:
         raise RuntimeError("No render GPUs resolved. Pass --render-gpus or use a cuda device.")
 
@@ -755,86 +1021,224 @@ def main() -> None:
             shutil.rmtree(output_root)
     ensure_dir(output_root)
 
-    start_time = time.time()
-    _ensure_blender_ready()
-    models_bundle = _load_models(model_name=args.model, device=args.device)
+    if len(generate_gpu_ids) > 1:
+        orchestration_started = time.time()
+        print(f"[Autoencode] Auto-sharding reconstruction across {len(generate_gpu_ids)} GPU(s): {', '.join(generate_gpu_ids)}")
+        _launch_generation_shards(
+            args=args,
+            gt_root=gt_root,
+            output_root=output_root,
+            generate_gpu_ids=generate_gpu_ids,
+        )
+        manifest_objects, failed_objects = _merge_shard_outputs(
+            output_root=output_root,
+            args=args,
+            cases=cases,
+            eval_device=eval_device,
+            generate_gpu_ids=generate_gpu_ids,
+            render_gpu_ids=render_gpu_ids,
+            resolution=resolution,
+        )
+        if args.generate_only:
+            print(
+                f"[Done] Reconstruct phase saved {len(manifest_objects)}/{len(grouped_cases)} objects "
+                f"across {len(generate_gpu_ids)} GPU(s)"
+            )
+            print(f"[Done] Pred root: {output_root}")
+            return
+        if failed_objects:
+            raise RuntimeError("Multi-GPU autoencode finished with failed objects. Fix them or rerun with --resume.")
+        if len(manifest_objects) < len(grouped_cases):
+            raise RuntimeError("Multi-GPU autoencode did not produce all requested objects.")
 
+        print("[Render] Rendering benchmark views...")
+        if not render_all_results(output_root, gpu_ids=render_gpu_ids, metrics=list(args.metrics)):
+            raise RuntimeError("Benchmark rendering failed.")
+
+        print("[Eval] Running benchmark evaluation...")
+        eval_output_dir = ensure_dir(output_root / "evaluation_output")
+        ok, summary = run_evaluation(
+            gt_root=gt_root,
+            pred_root=output_root,
+            metrics=list(args.metrics),
+            output_dir=eval_output_dir,
+            device=eval_device,
+        )
+        if not ok or summary is None:
+            raise RuntimeError("Benchmark evaluation failed.")
+
+        total_time = time.time() - orchestration_started
+        save_results(
+            output_root=output_root,
+            entrypoint_name="baseline",
+            config_name=args.config_name,
+            run_group=args.run_group,
+            gt_root=gt_root,
+            cases=cases,
+            requested_metrics=list(args.metrics),
+            benchmark_root=benchmark_root,
+            skip_benchmark_render=False,
+            results=summary,
+            total_time=total_time,
+        )
+        print(f"[Done] TRELLIS.2 autoencode benchmark finished in {total_time:.1f}s")
+        print(f"[Done] Pred root: {output_root}")
+        return
+
+    manifest_path = _reconstruct_manifest_path(
+        output_root,
+        shard_count=args.object_shard_count,
+        shard_index=args.object_shard_index,
+    )
+    failures_path = _reconstruct_failures_path(
+        output_root,
+        shard_count=args.object_shard_count,
+        shard_index=args.object_shard_index,
+    )
     manifest_objects: dict[str, Any] = {}
     failed_objects: dict[str, Any] = {}
+    if args.resume and manifest_path.is_file():
+        existing_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_objects.update(existing_manifest.get("objects") or {})
+        failed_objects.update(existing_manifest.get("failed_objects") or {})
+    if args.resume and failures_path.is_file():
+        existing_failures = json.loads(failures_path.read_text(encoding="utf-8"))
+        failed_objects.update(existing_failures.get("objects") or {})
     total_objects = len(grouped_cases)
+    pending_grouped_cases: dict[tuple[str, str], list[int]] = {}
+    for (dataset, object_name), prompt_ids in grouped_cases.items():
+        object_key = f"{dataset}/{object_name}"
+        existing_result = None
+        if args.resume:
+            existing_result = _existing_object_result(
+                gt_root=gt_root,
+                output_root=output_root,
+                dataset=dataset,
+                object_name=object_name,
+                prompt_ids=prompt_ids,
+            )
+        if existing_result is not None:
+            manifest_objects[object_key] = existing_result
+            failed_objects.pop(object_key, None)
+            continue
+        pending_grouped_cases[(dataset, object_name)] = prompt_ids
+
+    _write_reconstruct_manifest(
+        manifest_path=manifest_path,
+        config_name=args.config_name,
+        run_group=args.run_group,
+        model=args.model,
+        device=args.device,
+        eval_device=eval_device,
+        generate_gpu_ids=generate_gpu_ids,
+        render_gpu_ids=render_gpu_ids,
+        quality=args.quality,
+        resolution=resolution,
+        drop_normal=bool(args.drop_normal),
+        object_shard_count=args.object_shard_count,
+        object_shard_index=args.object_shard_index,
+        generation_shard_count=args.object_shard_count,
+        metrics=list(args.metrics),
+        cases=cases,
+        manifest_objects=manifest_objects,
+        failed_objects=failed_objects,
+    )
+    if failed_objects:
+        write_json(failures_path, {"objects": failed_objects})
+    elif failures_path.exists():
+        failures_path.unlink()
+
     print(
         f"[Shard] object shard {args.object_shard_index}/{args.object_shard_count} "
         f"selected {total_objects}/{total_objects_all} objects"
     )
+    existing_object_count = total_objects - len(pending_grouped_cases)
+    if pending_grouped_cases:
+        print(f"[Shard] {existing_object_count}/{total_objects} objects already exist")
+    else:
+        print(f"[Shard] {total_objects}/{total_objects} objects already exist")
     new_object_count = 0
-    for object_index, ((dataset, object_name), prompt_ids) in enumerate(grouped_cases.items(), start=1):
-        object_key = f"{dataset}/{object_name}"
-        print(
-            f"[Autoencode] {object_index}/{total_objects} {object_key} "
-            f"-> prompts {','.join(str(item) for item in prompt_ids)}"
-        )
-        try:
-            object_result = _reconstruct_object(
-                models_bundle=models_bundle,
-                gt_root=gt_root,
-                output_root=output_root,
-                resolution=resolution,
-                device=args.device,
-                dataset=dataset,
-                object_name=object_name,
-                prompt_ids=prompt_ids,
-                drop_normal=args.drop_normal,
-            )
-        except Exception as exc:
-            failed_objects[object_key] = {
-                "dataset": dataset,
-                "object_name": object_name,
-                "prompt_ids": list(prompt_ids),
-                "error": str(exc),
-                "traceback": traceback.format_exc(),
-            }
-            write_json(output_root / "reconstruct_failures.json", {"objects": failed_objects})
-            if not args.continue_on_object_error:
-                raise
-            print(f"[Skip] {object_key} failed: {exc}")
-            _release_cuda_memory()
-            continue
-        manifest_objects[object_key] = object_result
-        if not object_result.get("resumed", False):
-            new_object_count += 1
-        write_json(
-            output_root / "reconstruct_manifest.json",
-            {
-                "config_name": args.config_name,
-                "run_group": args.run_group,
-                "model": args.model,
-                "device": args.device,
-                "eval_device": eval_device,
-                "render_gpu_ids": render_gpu_ids,
-                "quality": args.quality,
-                "resolution": resolution,
-                "drop_normal": bool(args.drop_normal),
-                "object_shard_count": args.object_shard_count,
-                "object_shard_index": args.object_shard_index,
-                "metrics": list(args.metrics),
-                "cases": [
-                    {
-                        "dataset": case_dataset,
-                        "object_name": case_object_name,
-                        "prompt_id": case_prompt_id,
-                    }
-                    for case_dataset, case_object_name, case_prompt_id in cases
-                ],
-                "objects": manifest_objects,
-                "failed_objects": failed_objects,
-            },
-        )
-        if args.max_new_objects > 0 and new_object_count >= args.max_new_objects:
+    if not pending_grouped_cases:
+        if args.generate_only:
             print(
-                f"[Stop] Reached max new objects for this run: "
-                f"{new_object_count}/{args.max_new_objects}"
+                f"[Done] Reconstruct phase saved {len(manifest_objects)}/{total_objects} objects "
+                f"(new this run: {new_object_count})"
             )
-            break
+            print(f"[Done] Pred root: {output_root}")
+            return
+        start_time = time.time()
+    else:
+        start_time = time.time()
+        _ensure_blender_ready()
+        models_bundle = _load_models(model_name=args.model, device=args.device)
+
+        completed_offset = existing_object_count
+        for object_index, ((dataset, object_name), prompt_ids) in enumerate(pending_grouped_cases.items(), start=1):
+            object_key = f"{dataset}/{object_name}"
+            print(
+                f"[Autoencode] {completed_offset + object_index}/{total_objects} {object_key} "
+                f"-> prompts {','.join(str(item) for item in prompt_ids)}"
+            )
+            try:
+                object_result = _reconstruct_object(
+                    models_bundle=models_bundle,
+                    gt_root=gt_root,
+                    output_root=output_root,
+                    resolution=resolution,
+                    device=args.device,
+                    dataset=dataset,
+                    object_name=object_name,
+                    prompt_ids=prompt_ids,
+                    drop_normal=args.drop_normal,
+                )
+            except Exception as exc:
+                failed_objects[object_key] = {
+                    "dataset": dataset,
+                    "object_name": object_name,
+                    "prompt_ids": list(prompt_ids),
+                    "error": str(exc),
+                    "traceback": traceback.format_exc(),
+                }
+                write_json(failures_path, {"objects": failed_objects})
+                if not args.continue_on_object_error:
+                    raise
+                print(f"[Skip] {object_key} failed: {exc}")
+                _release_cuda_memory()
+                continue
+            manifest_objects[object_key] = object_result
+            failed_objects.pop(object_key, None)
+            if not object_result.get("resumed", False):
+                new_object_count += 1
+            _write_reconstruct_manifest(
+                manifest_path=manifest_path,
+                config_name=args.config_name,
+                run_group=args.run_group,
+                model=args.model,
+                device=args.device,
+                eval_device=eval_device,
+                generate_gpu_ids=generate_gpu_ids,
+                render_gpu_ids=render_gpu_ids,
+                quality=args.quality,
+                resolution=resolution,
+                drop_normal=bool(args.drop_normal),
+                object_shard_count=args.object_shard_count,
+                object_shard_index=args.object_shard_index,
+                generation_shard_count=args.object_shard_count,
+                metrics=list(args.metrics),
+                cases=cases,
+                manifest_objects=manifest_objects,
+                failed_objects=failed_objects,
+            )
+            if failed_objects:
+                write_json(failures_path, {"objects": failed_objects})
+            elif failures_path.exists():
+                failures_path.unlink()
+            if args.max_new_objects > 0 and new_object_count >= args.max_new_objects:
+                print(
+                    f"[Stop] Reached max new objects for this run: "
+                    f"{new_object_count}/{args.max_new_objects}"
+                )
+                break
 
     if args.generate_only or len(manifest_objects) < total_objects:
         print(

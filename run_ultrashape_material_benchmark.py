@@ -67,7 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Log prompt-level failures and continue instead of aborting the whole run.",
     )
     parser.add_argument("--config-name", type=str, default="")
-    parser.add_argument("--run-group", type=str, default="baseline")
+    parser.add_argument("--run-group", type=str, default="basic_baselines")
     parser.add_argument("--hunyuan-model", type=str, default=DEFAULT_HUNYUAN_MODEL)
     parser.add_argument("--ultrashape-config", type=Path, default=DEFAULT_ULTRASHAPE_CONFIG)
     parser.add_argument("--ultrashape-ckpt", type=Path, default=DEFAULT_ULTRASHAPE_CKPT)

@@ -21,13 +21,8 @@ import numpy as np
 import torch
 from PIL import Image
 
-from trellis_edit.common import (
-    ensure_dir,
-    export_aligned_glb_to_reference,
-    release_cuda_memory,
-    utc_now_iso,
-    write_json,
-)
+from trellis_edit.alignment import export_hunyuan21_glb_to_canonical_space
+from trellis_edit.common import ensure_dir, release_cuda_memory, utc_now_iso, write_json
 
 
 DEFAULT_GT_ROOT = Path("/cache/wangxinxing/data/trellis_edit_benchmark/edit3d_data/data")
@@ -43,7 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Run Hunyuan3D-2.1 autoencoder reconstruction on Edit3D-Bench source GLBs, "
-            "generate textured reconstructions, align them to the source-model bbox, "
+            "generate textured reconstructions, align them to the canonical output space, "
             "and save pred-ready prompt edit.glb files."
         ),
     )
@@ -88,7 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Preserve exported GLB materials instead of rewriting them to matte non-metal.",
     )
     parser.add_argument("--config-name", type=str, default="baseline_hunyuan21_autoencode")
-    parser.add_argument("--run-group", type=str, default="baseline")
+    parser.add_argument("--run-group", type=str, default="basic_baselines")
     return parser
 
 
@@ -396,9 +391,8 @@ def _reconstruct_object(
             convert_seconds = round(time.time() - convert_started, 3)
 
             postprocess_started = time.time()
-            postprocess_stats = export_aligned_glb_to_reference(
+            postprocess_stats = export_hunyuan21_glb_to_canonical_space(
                 input_glb=textured_glb_path,
-                reference_glb=source_glb,
                 output_glb=object_glb_out,
                 apply_matte_nonmetal=not keep_materials,
                 drop_normal=drop_normal,

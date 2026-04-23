@@ -19,13 +19,8 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-from trellis_edit.common import (
-    ensure_dir,
-    export_aligned_glb_to_reference,
-    release_cuda_memory,
-    utc_now_iso,
-    write_json,
-)
+from trellis_edit.alignment import export_hunyuan21_glb_to_canonical_space
+from trellis_edit.common import ensure_dir, release_cuda_memory, utc_now_iso, write_json
 
 
 DEFAULT_GT_ROOT = Path("/cache/wangxinxing/data/trellis_edit_benchmark/edit3d_data/data")
@@ -41,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Run Hunyuan3D-2.1 direct edit-image generation on Edit3D-Bench and save "
-            "pred-ready textured edit.glb files after reference-bbox alignment and optional "
+            "pred-ready textured edit.glb files after native-space canonical alignment and optional "
             "matte non-metal material rewrite."
         ),
     )
@@ -86,7 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Preserve exported GLB materials instead of rewriting them to matte non-metal.",
     )
     parser.add_argument("--config-name", type=str, default="baseline_hunyuan21_direct_edit")
-    parser.add_argument("--run-group", type=str, default="baseline")
+    parser.add_argument("--run-group", type=str, default="basic_baselines")
     return parser
 
 
@@ -313,9 +308,8 @@ def _generate_case(
             convert_seconds = round(time.time() - convert_started, 3)
 
             postprocess_started = time.time()
-            postprocess_stats = export_aligned_glb_to_reference(
+            postprocess_stats = export_hunyuan21_glb_to_canonical_space(
                 input_glb=textured_glb_path,
-                reference_glb=reference_glb,
                 output_glb=output_glb,
                 apply_matte_nonmetal=not keep_materials,
                 drop_normal=drop_normal,

@@ -26,7 +26,7 @@ from run_batch_edit_and_eval import (
     DEFAULT_BENCHMARK_ROOT,
     DEFAULT_GT_ROOT,
     DEFAULT_METRICS,
-    DEFAULT_PRED_ROOT,
+    DEFAULT_PRED_DIRNAME,
     estimate_remaining_time,
     format_time,
     load_edit3d_metadata,
@@ -417,7 +417,7 @@ def run_editing_and_eval_compact(
     seed_override: int | None,
     dry_run: bool,
 ) -> tuple[bool, dict[str, Any] | None]:
-    if not skip_exists and pred_root.exists():
+    if not dry_run and not skip_exists and pred_root.exists():
         print(f"[INFO] 清理旧的输出目录: {pred_root}")
         shutil.rmtree(pred_root)
     ensure_dir(pred_root)
@@ -547,14 +547,14 @@ def main() -> int:
     object_name = args.object or batch_config.get("object")
     prompt_id = args.prompt_id or batch_config.get("prompt_id")
     max_cases = args.max_cases if args.max_cases is not None else batch_config.get("max_cases")
+    benchmark_root_text = args.benchmark_root or batch_config.get("benchmark_root")
+    benchmark_root = Path(benchmark_root_text).expanduser().resolve() if benchmark_root_text else DEFAULT_BENCHMARK_ROOT
     assets_root_text = args.assets_root or batch_config.get("assets_root")
     assets_root = Path(assets_root_text).expanduser().resolve() if assets_root_text else None
     pred_root_text = args.pred_root or batch_config.get("pred_root")
     pred_root = Path(pred_root_text).expanduser().resolve() if pred_root_text else (
-        DEFAULT_PRED_ROOT / f"{entrypoint_name}_{config_name}"
+        benchmark_root / DEFAULT_PRED_DIRNAME / f"{entrypoint_name}_{config_name}"
     ).resolve()
-    benchmark_root_text = args.benchmark_root or batch_config.get("benchmark_root")
-    benchmark_root = Path(benchmark_root_text).expanduser().resolve() if benchmark_root_text else DEFAULT_BENCHMARK_ROOT
     metrics = args.metrics or batch_config.get("metrics") or DEFAULT_METRICS
     device = args.device or config_data.get("runtime", {}).get("device") or batch_config.get("device") or "cuda:0"
     gpu_ids = parse_gpu_list(args.gpus or batch_config.get("gpus"), fallback_device=device)

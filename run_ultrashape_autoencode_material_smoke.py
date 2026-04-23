@@ -7,9 +7,9 @@ import json
 import time
 from pathlib import Path
 
+from trellis_edit.alignment import export_ultrashape_autoencode_glb_to_canonical_space
 from trellis_edit.common import (
     ensure_dir,
-    export_aligned_glb_to_reference,
     release_cuda_memory,
     utc_now_iso,
     write_json,
@@ -37,7 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Run a single UltraShape autoencode smoke case, synthesize texture with Hunyuan2.1 paint, "
-            "then export a reference-aligned textured edit.glb."
+            "then export a canonically aligned textured edit.glb."
         ),
     )
     parser.add_argument("--gt-root", type=Path, default=DEFAULT_GT_ROOT)
@@ -167,9 +167,8 @@ def main() -> None:
         run_payload["textured_glb_path"] = str(textured_glb_path)
 
         postprocess_started = time.time()
-        postprocess = export_aligned_glb_to_reference(
+        postprocess = export_ultrashape_autoencode_glb_to_canonical_space(
             input_glb=textured_glb_path,
-            reference_glb=reference_glb,
             output_glb=edit_glb_path,
             apply_matte_nonmetal=not args.keep_materials,
             drop_normal=args.drop_normal,

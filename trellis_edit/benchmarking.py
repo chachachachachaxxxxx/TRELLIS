@@ -16,7 +16,31 @@ from trellis_edit.common import ensure_dir, write_json
 DEFAULT_BENCHMARK_ROOT = Path("/cache/wangxinxing/data/trellis_edit_benchmark")
 RUN_LEVEL_METRICS = {"fid", "fid_buffered", "fvd"}
 TEXT_ALIGNMENT_VIEW_IDS = {"0000", "0001", "0007", "0008", "0009", "0015"}
+SHOWCASE_VIEW_SPECS = (
+    ("front", "render_0000.png"),
+    ("right", "render_0004.png"),
+    ("back", "render_0008.png"),
+    ("left", "render_0012.png"),
+)
 DEFAULT_RUN_GROUP_LABEL = "ungrouped"
+EXPERIMENT_CONFIG_FILENAMES = (
+    "_batch_source_config.yaml",
+    "_batch_source_config.yml",
+    "_batch_source_config.json",
+    "experiment_config.yaml",
+    "experiment_config.yml",
+    "experiment_config.json",
+    "config.yaml",
+    "config.yml",
+    "config.json",
+)
+EXPERIMENT_CONFIG_SOURCE_KEYS = (
+    "experiment_config_source_path",
+    "config_source_path",
+    "config_path",
+    "source_config_path",
+    "source_config",
+)
 METRIC_FAMILY_ORDER = (
     "Legacy Metrics",
     "Multi-View Metrics",
@@ -305,24 +329,16 @@ def _render_daily_run_pages(
     summary_payload: dict[str, Any],
     case_records: list[dict[str, Any]],
 ) -> None:
+    _ensure_experiment_config_page(
+        bundle_root=bundle_root,
+        manifest_payload=manifest_payload,
+    )
     run_label = str(manifest_payload.get("config_name") or manifest_payload.get("run_id") or bundle_root.name)
     run_id = str(manifest_payload.get("run_id") or bundle_root.name)
 
     for case_record in case_records:
         page_path = _case_record_page_path(bundle_root, case_record)
-        detail_relpath = str(case_record.get("detail_path") or "").strip()
-        case_payload = _load_json(bundle_root / detail_relpath) if detail_relpath else {}
-        if not case_payload:
-            case_payload = {
-                "case_id": case_record.get("case_id"),
-                "dataset": case_record.get("dataset"),
-                "object_name": case_record.get("object_name"),
-                "prompt_id": case_record.get("prompt_id"),
-                "status": case_record.get("status"),
-                "prompt_text": "",
-                "metrics": case_record.get("metrics") or {},
-                "artifacts": {},
-            }
+        case_payload = _load_case_payload(bundle_root, case_record)
         page_path.write_text(
             _render_case_page(
                 case_payload=case_payload,
@@ -340,6 +356,27 @@ def _render_daily_run_pages(
             encoding="utf-8",
         )
 
+    dataset_map: dict[str, list[dict[str, Any]]] = {}
+    for case_record in case_records:
+        dataset = str(case_record.get("dataset") or "").strip()
+        if not dataset:
+            continue
+        dataset_map.setdefault(dataset, []).append(case_record)
+    for dataset, dataset_case_records in dataset_map.items():
+        page_path = _run_dataset_gallery_page_path(bundle_root, dataset)
+        ensure_dir(page_path.parent)
+        page_path.write_text(
+            _render_run_dataset_gallery_page(
+                bundle_root=bundle_root,
+                page_path=page_path,
+                run_label=run_label,
+                run_id=run_id,
+                dataset=dataset,
+                case_records=dataset_case_records,
+            ),
+            encoding="utf-8",
+        )
+
     (bundle_root / "index.html").write_text(
         _render_run_index(
             bundle_root=bundle_root,
@@ -351,6 +388,23 @@ def _render_daily_run_pages(
     )
 
 
+def _load_case_payload(bundle_root: Path, case_record: dict[str, Any]) -> dict[str, Any]:
+    detail_relpath = str(case_record.get("detail_path") or "").strip()
+    case_payload = _load_json(bundle_root / detail_relpath) if detail_relpath else {}
+    if case_payload:
+        return case_payload
+    return {
+        "case_id": case_record.get("case_id"),
+        "dataset": case_record.get("dataset"),
+        "object_name": case_record.get("object_name"),
+        "prompt_id": case_record.get("prompt_id"),
+        "status": case_record.get("status"),
+        "prompt_text": "",
+        "metrics": case_record.get("metrics") or {},
+        "artifacts": {},
+    }
+
+
 def _case_record_page_path(bundle_root: Path, case_record: dict[str, Any]) -> Path:
     page_relpath = str(case_record.get("page_path") or "").strip()
     if page_relpath:
@@ -359,6 +413,10 @@ def _case_record_page_path(bundle_root: Path, case_record: dict[str, Any]) -> Pa
     object_name = str(case_record.get("object_name") or "").strip()
     prompt_id = int(case_record.get("prompt_id") or 0)
     return bundle_root / "pages" / dataset / object_name / f"prompt_{prompt_id}.html"
+
+
+def _run_dataset_gallery_page_path(bundle_root: Path, dataset: str) -> Path:
+    return bundle_root / "datasets" / f"{_slug(dataset)}.html"
 
 
 def _build_case_navigation_payload(
@@ -445,6 +503,46 @@ def _build_case_navigation_payload(
         "datasets": dataset_entries,
         "cases": case_entries,
     }
+
+
+def _build_run_dataset_entries(
+    *,
+    bundle_root: Path,
+    page_path: Path,
+    case_records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    dataset_map: dict[str, list[dict[str, Any]]] = {}
+    for record in case_records:
+        dataset = str(record.get("dataset") or "").strip()
+        if not dataset:
+            continue
+        dataset_map.setdefault(dataset, []).append(record)
+
+    entries: list[dict[str, Any]] = []
+    for dataset, records in sorted(dataset_map.items()):
+        sorted_records = sorted(
+            records,
+            key=lambda item: (
+                str(item.get("object_name") or ""),
+                int(item.get("prompt_id") or 0),
+                str(item.get("case_id") or ""),
+            ),
+        )
+        entries.append(
+            {
+                "dataset": dataset,
+                "count": len(sorted_records),
+                "gallery_href": _relative_href(
+                    page_path,
+                    _run_dataset_gallery_page_path(bundle_root, dataset),
+                ),
+                "first_case_href": _relative_href(
+                    page_path,
+                    _case_record_page_path(bundle_root, sorted_records[0]),
+                ),
+            }
+        )
+    return entries
 
 
 def build_focus_index(benchmark_root: Path) -> Path | None:
@@ -640,6 +738,7 @@ def _materialize_case_artifacts(
         "source_image": (prompt_dir / "2d_render.png", artifact_dir / "source_image.png"),
         "edit_image": (prompt_dir / "2d_edit.png", artifact_dir / "edit_image.png"),
         "mask_image": (prompt_dir / "2d_mask.png", artifact_dir / "mask_image.png"),
+        "edit_front_image": (pred_dir / "images" / "render_0000.png", artifact_dir / "edit_front_image.png"),
         "source_model_glb": (
             gt_root / dataset / object_name / "source_model" / "model.glb",
             artifact_dir / "source_model.glb",
@@ -1054,6 +1153,191 @@ def _collect_case_metric_names(case_records: list[dict[str, Any]]) -> list[str]:
     )
 
 
+def _resolve_pred_root_from_manifest(manifest_payload: dict[str, Any]) -> Path | None:
+    pred_root_text = str(manifest_payload.get("pred_root") or "").strip()
+    if not pred_root_text:
+        return None
+    return Path(pred_root_text).expanduser().resolve()
+
+
+def _resolve_experiment_config_candidate(
+    value: Any,
+    *,
+    pred_root: Path | None,
+) -> Path | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        if pred_root is None:
+            return None
+        path = (pred_root / path).resolve()
+    else:
+        path = path.resolve()
+    return path if path.is_file() else None
+
+
+def _iter_experiment_config_sources(
+    *,
+    pred_root: Path | None,
+    manifest_payload: dict[str, Any],
+) -> list[Path]:
+    sources: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path | None) -> None:
+        if path is None:
+            return
+        key = str(path)
+        if key in seen:
+            return
+        seen.add(key)
+        sources.append(path)
+
+    for key in EXPERIMENT_CONFIG_SOURCE_KEYS:
+        add(_resolve_experiment_config_candidate(manifest_payload.get(key), pred_root=pred_root))
+
+    if pred_root is not None:
+        pred_manifest = _load_json(pred_root / "manifest.json")
+        for key in EXPERIMENT_CONFIG_SOURCE_KEYS:
+            add(_resolve_experiment_config_candidate(pred_manifest.get(key), pred_root=pred_root))
+        for filename in EXPERIMENT_CONFIG_FILENAMES:
+            candidate = pred_root / filename
+            add(candidate if candidate.is_file() else None)
+
+    return sources
+
+
+def _ensure_experiment_config_page(
+    *,
+    bundle_root: Path,
+    manifest_payload: dict[str, Any],
+) -> None:
+    manifest_path = bundle_root / "manifest.json"
+    updated = False
+
+    config_relpath = str(manifest_payload.get("experiment_config_path") or "").strip()
+    config_path = bundle_root / config_relpath if config_relpath else None
+    if config_path is not None and not config_path.is_file():
+        config_path = None
+        config_relpath = ""
+
+    if config_path is None:
+        pred_root = _resolve_pred_root_from_manifest(manifest_payload)
+        for source_path in _iter_experiment_config_sources(
+            pred_root=pred_root,
+            manifest_payload=manifest_payload,
+        ):
+            bundled_config_dir = ensure_dir(bundle_root / "config")
+            bundled_config_path = bundled_config_dir / source_path.name
+            if not bundled_config_path.is_file():
+                _link_or_copy(source_path, bundled_config_path)
+            config_path = bundled_config_path
+            config_relpath = _bundle_relpath(bundle_root, bundled_config_path)
+            manifest_payload["experiment_config_path"] = config_relpath
+            manifest_payload["experiment_config_source_path"] = str(source_path)
+            manifest_payload["experiment_config_label"] = source_path.name
+            updated = True
+            break
+
+    if config_path is None:
+        return
+
+    if not str(manifest_payload.get("experiment_config_label") or "").strip():
+        manifest_payload["experiment_config_label"] = config_path.name
+        updated = True
+
+    page_relpath = str(manifest_payload.get("experiment_config_page_path") or "").strip()
+    if not page_relpath:
+        page_relpath = "config.html"
+        manifest_payload["experiment_config_page_path"] = page_relpath
+        updated = True
+    page_path = bundle_root / page_relpath
+    page_path.write_text(
+        _render_experiment_config_page(
+            bundle_root=bundle_root,
+            page_path=page_path,
+            manifest_payload=manifest_payload,
+            config_path=config_path,
+        ),
+        encoding="utf-8",
+    )
+
+    if updated:
+        write_json(manifest_path, manifest_payload)
+
+
+def _render_experiment_config_page(
+    *,
+    bundle_root: Path,
+    page_path: Path,
+    manifest_payload: dict[str, Any],
+    config_path: Path,
+) -> str:
+    run_href = _relative_href(page_path, bundle_root / "index.html")
+    raw_href = _relative_href(page_path, config_path)
+    label = str(manifest_payload.get("experiment_config_label") or config_path.name)
+    run_label = str(manifest_payload.get("config_name") or manifest_payload.get("run_id") or bundle_root.name)
+    source_path = str(manifest_payload.get("experiment_config_source_path") or "").strip()
+    format_label = config_path.suffix.lstrip(".").upper() or "TEXT"
+    content = config_path.read_text(encoding="utf-8", errors="replace")
+    source_line = (
+        f"<p class='muted source-path'>source: {html.escape(source_path)}</p>"
+        if source_path
+        else ""
+    )
+    return f"""<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{html.escape(run_label)} / Experiment Config</title>
+  <style>
+    body {{ font-family: "Segoe UI", sans-serif; margin: 0; background: #f7f7f7; color: #222; }}
+    .page {{ width: min(1480px, calc(100vw - 32px)); margin: 24px auto 48px; }}
+    .hero, .panel {{ background: #fff; border: 1px solid #ddd; border-radius: 14px; padding: 18px 20px; }}
+    .hero {{ margin-bottom: 18px; }}
+    .nav-links {{ display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }}
+    .nav-link {{ display: inline-flex; align-items: center; padding: 8px 12px; border-radius: 999px; border: 1px solid #d9d9d9; background: #fafafa; color: #222; text-decoration: none; font-size: 13px; }}
+    .meta-row {{ display: flex; gap: 12px; flex-wrap: wrap; margin-top: 14px; }}
+    .meta {{ background: #fafafa; border: 1px solid #e5e5e5; border-radius: 12px; padding: 12px 14px; }}
+    .meta strong {{ display: block; font-size: 18px; margin-top: 4px; }}
+    .code-wrap {{ overflow: auto; border-radius: 12px; border: 1px solid #e5e7eb; background: #0f172a; }}
+    pre {{ margin: 0; padding: 18px; color: #e2e8f0; font-size: 13px; line-height: 1.6; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }}
+    a {{ color: #0b57d0; text-decoration: none; }}
+    h1, h2, p {{ margin: 0; }}
+    .muted {{ color: #666; }}
+    .source-path {{ margin-top: 10px; word-break: break-all; }}
+  </style>
+</head>
+<body>
+  <div class="page">
+    <section class="hero">
+      <div class="nav-links">
+        <a class="nav-link" href="{html.escape(run_href)}">Back To Run</a>
+        <a class="nav-link" href="{html.escape(raw_href)}" target="_blank" rel="noopener">Open Raw File</a>
+      </div>
+      <h1>{html.escape(run_label)}</h1>
+      <p class="muted" style="margin-top: 8px;">Experiment config preview</p>
+      <div class="meta-row">
+        <div class="meta"><span>file</span><strong>{html.escape(label)}</strong></div>
+        <div class="meta"><span>format</span><strong>{html.escape(format_label)}</strong></div>
+      </div>
+      {source_line}
+    </section>
+    <section class="panel">
+      <h2 style="margin-bottom: 12px;">Config Content</h2>
+      <div class="code-wrap"><pre>{html.escape(content)}</pre></div>
+    </section>
+  </div>
+</body>
+</html>
+"""
+
+
 def _format_summary_metric_value(value: Any) -> str:
     if isinstance(value, dict):
         if value.get("value") is not None:
@@ -1219,6 +1503,11 @@ def _render_run_index(
         [item.get("metrics") or {} for item in case_records],
         case_metric_names,
     )
+    dataset_entries = _build_run_dataset_entries(
+        bundle_root=bundle_root,
+        page_path=bundle_root / "index.html",
+        case_records=case_records,
+    )
 
     case_rows = []
     for row_index, item in enumerate(case_records):
@@ -1248,6 +1537,33 @@ def _render_run_index(
         )
         for metric_name in case_metric_names
     )
+    dataset_card_items = []
+    for item in dataset_entries:
+        first_case_link = ""
+        if item.get("first_case_href"):
+            first_case_link = (
+                f"<a href=\"{html.escape(str(item['first_case_href'] or '#'))}\">Open First Case</a>"
+            )
+        dataset_card_items.append(
+            "<article class='dataset-card'>"
+            f"<h3>{html.escape(item['dataset'])}</h3>"
+            f"<p class='muted'>{item['count']} case(s)</p>"
+            "<div class='dataset-card-links'>"
+            f"<a href=\"{html.escape(str(item['gallery_href'] or '#'))}\">Browse Visuals</a>"
+            f"{first_case_link}"
+            "</div>"
+            "</article>"
+        )
+    dataset_cards = "".join(dataset_card_items)
+    dataset_section = (
+        "<section class=\"panel\" style=\"margin-bottom: 18px;\">"
+        "<h2>Datasets</h2>"
+        "<p class='muted' style='margin-top: 8px;'>Open a dataset gallery to browse all packaged sample visualizations for this run.</p>"
+        f"<div class='dataset-grid'>{dataset_cards}</div>"
+        "</section>"
+        if dataset_entries
+        else ""
+    )
     return f'''<!DOCTYPE html>
 <html lang="zh">
 <head>
@@ -1264,6 +1580,10 @@ def _render_run_index(
     .stats {{ display: flex; gap: 12px; flex-wrap: wrap; margin-top: 14px; }}
     .stat, .metric {{ background: #fafafa; border: 1px solid #e5e5e5; border-radius: 12px; padding: 12px 14px; }}
     .stat strong, .metric strong {{ display: block; font-size: 20px; margin-top: 4px; }}
+    .dataset-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }}
+    .dataset-card {{ background: #fafafa; border: 1px solid #e5e5e5; border-radius: 12px; padding: 14px; }}
+    .dataset-card h3 {{ margin: 0 0 6px; }}
+    .dataset-card-links {{ display: flex; gap: 12px; flex-wrap: wrap; margin-top: 12px; font-size: 13px; }}
     .metric-family + .metric-family {{ margin-top: 22px; }}
     .metric-family-head {{ margin-bottom: 12px; }}
     .metric-family-head h3 {{ margin: 0 0 4px; }}
@@ -1305,6 +1625,7 @@ def _render_run_index(
       <h2>Summary Metrics</h2>
       {summary_metrics}
     </section>
+    {dataset_section}
     <section class="panel">
       <h2>Cases</h2>
       <p class="heatmap-note">Column heatmap shows the best, second, and third values for each metric across cases.</p>
@@ -1356,6 +1677,20 @@ def _render_daily_runs_table(
     rows = []
     for row_index, run in enumerate(runs):
         run_href = _href_between_paths(page_path, daily_root / run["path"] / "index.html") or "#"
+        config_page_relpath = str((run.get("manifest") or {}).get("experiment_config_page_path") or "").strip()
+        config_href = (
+            _href_between_paths(
+                page_path,
+                daily_root / run["path"] / config_page_relpath,
+            )
+            if config_page_relpath
+            else None
+        )
+        config_link_html = (
+            f"<div class='small'><a href='{html.escape(config_href)}'>config</a></div>"
+            if config_href
+            else ""
+        )
         totals = (run.get("summary") or {}).get("totals") or {}
         summary_metrics = (run.get("summary") or {}).get("metrics", {})
         metric_cells = []
@@ -1370,7 +1705,7 @@ def _render_daily_runs_table(
             )
         rows.append(
             "<tr>"
-            f"<td><a href='{html.escape(run_href)}'>{html.escape(run['label'])}</a><div class='muted small'>{html.escape(run['id'])}</div></td>"
+            f"<td><a href='{html.escape(run_href)}'>{html.escape(run['label'])}</a><div class='muted small'>{html.escape(run['id'])}</div>{config_link_html}</td>"
             + "".join(metric_cells)
             + f"<td>{html.escape(str(run.get('created_at') or ''))}</td>"
             + f"<td>{html.escape(str(totals.get('cases', 0)))}</td>"
@@ -1396,6 +1731,255 @@ def _render_daily_runs_table(
         "</thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table></div>"
+    )
+
+
+def _render_run_dataset_gallery_page(
+    *,
+    bundle_root: Path,
+    page_path: Path,
+    run_label: str,
+    run_id: str,
+    dataset: str,
+    case_records: list[dict[str, Any]],
+) -> str:
+    sorted_records = sorted(
+        case_records,
+        key=lambda item: (
+            str(item.get("object_name") or ""),
+            int(item.get("prompt_id") or 0),
+            str(item.get("case_id") or ""),
+        ),
+    )
+    cards: list[str] = []
+    for case_record in sorted_records:
+        case_payload = _load_case_payload(bundle_root, case_record)
+        artifacts = case_payload.get("artifacts") or {}
+        image_cards = []
+        for label, key in (
+            ("source", "source_image"),
+            ("edit", "edit_image"),
+            ("result", "edit_front_image"),
+        ):
+            href = _href_from_page(page_path, bundle_root, artifacts.get(key))
+            if href is None:
+                continue
+            image_cards.append(
+                "<figure class='gallery-thumb'>"
+                f"<div class='gallery-label'>{html.escape(label)}</div>"
+                f"<img src=\"{html.escape(href)}\" alt=\"{html.escape(label)}\" loading=\"lazy\">"
+                "</figure>"
+            )
+        links = []
+        detail_href = _relative_href(page_path, _case_record_page_path(bundle_root, case_record))
+        if detail_href:
+            links.append(f"<a href=\"{html.escape(detail_href)}\">case page</a>")
+        renders_href = _href_from_page(page_path, bundle_root, artifacts.get("images"))
+        if renders_href:
+            links.append(f"<a href=\"{html.escape(renders_href)}\" target=\"_blank\" rel=\"noopener\">renders</a>")
+        edit_glb_href = _href_from_page(page_path, bundle_root, artifacts.get("edit_glb"))
+        if edit_glb_href:
+            links.append(f"<a href=\"{html.escape(edit_glb_href)}\" target=\"_blank\" rel=\"noopener\">edit.glb</a>")
+        prompt_text = str(case_payload.get("prompt_text") or "").strip()
+        status = str(case_payload.get("status") or case_record.get("status") or "unknown")
+        prompt_line = ""
+        if prompt_text:
+            prompt_line = f"<p class='muted small'>{html.escape(prompt_text)}</p>"
+        image_grid_html = "".join(image_cards) or "<p class='muted'>No packaged images.</p>"
+        cards.append(
+            "<article class='gallery-card'>"
+            "<div class='gallery-card-head'>"
+            "<div>"
+            f"<h2>{html.escape(str(case_payload.get('object_name') or ''))}</h2>"
+            f"<p class='muted'>{html.escape(str(case_payload.get('case_id') or ''))}</p>"
+            f"{prompt_line}"
+            "</div>"
+            f"<div class='status'>{html.escape(status)}</div>"
+            "</div>"
+            f"<div class='gallery-grid'>{image_grid_html}</div>"
+            f"<div class='gallery-links'>{' · '.join(links)}</div>"
+            "</article>"
+        )
+
+    back_href = _relative_href(page_path, bundle_root / "index.html") or "../index.html"
+    return f"""<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{html.escape(run_id)} / {html.escape(dataset)}</title>
+  <style>
+    body {{ font-family: "Segoe UI", sans-serif; margin: 0; background: #f7f7f7; color: #222; }}
+    .page {{ width: min(1680px, calc(100vw - 32px)); margin: 24px auto 48px; }}
+    .hero, .panel, .gallery-card {{ background: #fff; border: 1px solid #ddd; border-radius: 14px; }}
+    .hero {{ padding: 18px 20px; margin-bottom: 18px; }}
+    .gallery-list {{ display: grid; gap: 16px; }}
+    .gallery-card {{ padding: 16px; }}
+    .gallery-card-head {{ display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 14px; }}
+    .gallery-grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }}
+    .gallery-thumb {{ margin: 0; }}
+    .gallery-label {{ font-size: 12px; color: #666; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.04em; }}
+    .gallery-thumb img {{ width: 100%; aspect-ratio: 1 / 1; object-fit: cover; border-radius: 10px; border: 1px solid #ddd; background: #fff; }}
+    .gallery-links {{ margin-top: 12px; font-size: 13px; }}
+    .status {{ font-weight: 600; }}
+    a {{ color: #0b57d0; text-decoration: none; }}
+    h1, h2, p {{ margin: 0; }}
+    .muted {{ color: #666; }}
+    .small {{ font-size: 12px; margin-top: 4px; }}
+    @media (max-width: 960px) {{ .gallery-grid {{ grid-template-columns: 1fr; }} }}
+  </style>
+</head>
+<body>
+  <div class="page">
+    <section class="hero">
+      <p><a href="{html.escape(back_href)}">Back To Run</a></p>
+      <h1>{html.escape(run_label)} / {html.escape(dataset)}</h1>
+      <p class="muted" style="margin-top: 8px;">Browse all packaged sample visualizations for this dataset.</p>
+    </section>
+    <section class="panel" style="padding: 18px 20px;">
+      <div class="gallery-list">{''.join(cards)}</div>
+    </section>
+  </div>
+</body>
+</html>
+"""
+
+
+def _select_showcase_runs(
+    grouped_runs: list[tuple[str, list[dict[str, Any]]]],
+    current_group: str | None,
+) -> list[dict[str, Any]]:
+    if current_group is None:
+        all_runs = [run for _, runs in grouped_runs for run in runs]
+        all_runs.sort(
+            key=lambda item: (
+                str(item.get("created_at") or ""),
+                str(item.get("id") or ""),
+            ),
+            reverse=True,
+        )
+        selected: list[dict[str, Any]] = []
+        seen_labels: set[str] = set()
+        for run in all_runs:
+            label = str(run.get("label") or "")
+            if label in seen_labels:
+                continue
+            seen_labels.add(label)
+            selected.append(run)
+            if len(selected) >= 4:
+                break
+        return selected
+    if not grouped_runs:
+        return []
+    return grouped_runs[0][1][:3]
+
+
+def _build_collection_showcase_cards(
+    *,
+    page_path: Path,
+    runs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    cards: list[dict[str, Any]] = []
+    for run in runs:
+        run_root = Path(run["root"])
+        case_records = _load_jsonl(run_root / "cases.jsonl")
+        for case_record in case_records:
+            status = str(case_record.get("status") or "").strip().lower()
+            if status == "failed":
+                continue
+            case_payload = _load_case_payload(run_root, case_record)
+            artifacts = case_payload.get("artifacts") or {}
+            source_relpath = artifacts.get("source_image")
+            edit_relpath = artifacts.get("edit_image")
+            images_relpath = artifacts.get("images")
+            if not source_relpath or not edit_relpath or not images_relpath:
+                continue
+
+            source_href = _href_between_paths(page_path, run_root / str(source_relpath))
+            edit_href = _href_between_paths(page_path, run_root / str(edit_relpath))
+            if source_href is None or edit_href is None:
+                continue
+
+            views: list[dict[str, str]] = []
+            all_present = True
+            images_root = run_root / str(images_relpath)
+            for label, filename in SHOWCASE_VIEW_SPECS:
+                href = _href_between_paths(page_path, images_root / filename)
+                if href is None:
+                    all_present = False
+                    break
+                views.append({"label": label, "href": href})
+            if not all_present:
+                continue
+
+            case_page_href = _href_between_paths(page_path, _case_record_page_path(run_root, case_record))
+            cards.append(
+                {
+                    "run_label": str(run.get("label") or run_root.name),
+                    "group_name": str(run.get("group_name") or ""),
+                    "case_id": str(case_payload.get("case_id") or case_record.get("case_id") or ""),
+                    "prompt_text": str(case_payload.get("prompt_text") or "").strip(),
+                    "case_page_href": case_page_href,
+                    "source_href": source_href,
+                    "edit_href": edit_href,
+                    "views": views,
+                }
+            )
+            break
+    return cards
+
+
+def _render_collection_showcase(cards: list[dict[str, Any]]) -> str:
+    if not cards:
+        return ""
+    card_html = []
+    for card in cards:
+        strip_items = [
+            (
+                "source",
+                card["source_href"],
+            ),
+            (
+                "edit",
+                card["edit_href"],
+            ),
+            *[(item["label"], item["href"]) for item in card["views"]],
+        ]
+        thumbs = "".join(
+            (
+                "<figure class='showcase-thumb'>"
+                f"<div class='showcase-label'>{html.escape(label)}</div>"
+                f"<img src=\"{html.escape(href)}\" alt=\"{html.escape(label)}\" loading=\"lazy\">"
+                "</figure>"
+            )
+            for label, href in strip_items
+        )
+        links = []
+        if card.get("case_page_href"):
+            links.append(f"<a href=\"{html.escape(str(card['case_page_href']))}\">case page</a>")
+        prompt_line = ""
+        if card.get("prompt_text"):
+            prompt_line = f"<p class='muted small'>{html.escape(str(card['prompt_text']))}</p>"
+        card_html.append(
+            "<article class='showcase-card'>"
+            "<div class='showcase-card-head'>"
+            "<div>"
+            f"<h3>{html.escape(card['run_label'])}</h3>"
+            f"<p class='muted'>{html.escape(card['case_id'])}</p>"
+            f"{prompt_line}"
+            "</div>"
+            f"<div class='section-links'>{' · '.join(links)}</div>"
+            "</div>"
+            f"<div class='showcase-strip'>{thumbs}</div>"
+            "</article>"
+        )
+    return (
+        "<section class='panel'>"
+        "<div class='section-head'>"
+        "<div><h2>Quick Showcase</h2><p class='muted'>One sample row per selected run. Layout: source, edit, front, right, back, left.</p></div>"
+        "</div>"
+        f"<div class='showcase-list'>{''.join(card_html)}</div>"
+        "</section>"
     )
 
 
@@ -1513,14 +2097,21 @@ def _render_case_page(
             f"<div class='artifact'><span>{html.escape(label)}</span><a href=\"{html.escape(href)}\" target=\"_blank\" rel=\"noopener\">open</a></div>"
         )
 
+    image_title_map = {
+        "source_image": "source_image",
+        "edit_image": "edit_image",
+        "mask_image": "mask_image",
+        "edit_front_image": "edit_front_view",
+    }
     image_blocks = []
-    for key in ("source_image", "edit_image", "mask_image"):
+    for key in ("source_image", "edit_image", "mask_image", "edit_front_image"):
         bundle_relative_path = case_payload.get("artifacts", {}).get(key)
         href = _href_from_page(page_path, bundle_root, bundle_relative_path)
         if href is None:
             continue
+        title = image_title_map.get(key, key)
         image_blocks.append(
-            f"<section class='image-card'><h2>{html.escape(key)}</h2><img src=\"{html.escape(href)}\" alt=\"{html.escape(key)}\"></section>"
+            f"<section class='image-card'><h2>{html.escape(title)}</h2><img src=\"{html.escape(href)}\" alt=\"{html.escape(title)}\"></section>"
         )
 
     source_model_href = _href_from_page(
@@ -1588,6 +2179,17 @@ def _render_case_page(
     status = str(case_payload.get("status") or "unknown")
     status_class = status if status in {"ok", "partial", "failed"} else "unknown"
     navigation_json = json.dumps(navigation_payload, ensure_ascii=False)
+    combined_available = source_model_href is not None or mask_glb_href is not None
+    source_model_button_label = "Load" if source_model_href is not None else "Unavailable"
+    source_model_status = "Loads on demand." if source_model_href is not None else "Artifact unavailable."
+    edit_model_button_label = "Load" if edit_glb_href is not None else "Unavailable"
+    edit_model_status = "Loads on demand." if edit_glb_href is not None else "Artifact unavailable."
+    source_voxelmesh_button_label = "Load" if source_voxelmesh_href is not None else "Unavailable"
+    source_voxelmesh_status = "Loads on demand." if source_voxelmesh_href is not None else "Artifact unavailable."
+    combined_button_label = "Load" if combined_available else "Unavailable"
+    combined_status = "Loads on demand." if combined_available else "Artifact unavailable."
+    ss_voxelmesh_button_label = "Load" if ss_voxelmesh_href is not None else "Unavailable"
+    ss_voxelmesh_status = "Loads on demand." if ss_voxelmesh_href is not None else "Artifact unavailable."
     return f"""<!DOCTYPE html>
 <html lang="zh">
 <head>
@@ -1607,7 +2209,7 @@ def _render_case_page(
     .header-content {{ position: relative; z-index: 1; }}
     .header h1 {{ margin: 0; font-size: 2.1em; font-weight: 700; letter-spacing: -0.02em; }}
     .header p {{ margin: 8px 0 0; opacity: 0.9; }}
-    .back-link {{ display: inline-flex; align-items: center; margin-bottom: 14px; color: #fff; text-decoration: none; font-weight: 600; }}
+    .back-link {{ display: inline-flex; align-items: center; color: #fff; text-decoration: none; font-weight: 600; }}
     .navigation {{ background: #f8fafc; padding: 24px 30px; border-bottom: 1px solid #e2e8f0; }}
     .top-controls {{ display: flex; align-items: center; justify-content: center; gap: 24px; margin-bottom: 18px; flex-wrap: wrap; }}
     .control-group {{ display: flex; align-items: center; gap: 12px; background: #fff; padding: 12px 18px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05); }}
@@ -1643,6 +2245,7 @@ def _render_case_page(
     .artifact-grid {{ grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }}
     .image-grid {{ grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }}
     .viewer-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }}
+    .viewer-grid + .viewer-grid {{ margin-top: 16px; }}
     .metric, .artifact {{ background: #fafafa; border: 1px solid #e5e5e5; border-radius: 12px; padding: 12px 14px; }}
     .metric strong {{ display: block; font-size: 20px; margin-top: 4px; }}
     .metric small {{ display: block; margin-top: 6px; color: #666; font-size: 12px; }}
@@ -1660,8 +2263,14 @@ def _render_case_page(
     .metric-more > summary {{ cursor: pointer; color: #0b57d0; }}
     img {{ width: 100%; border-radius: 12px; border: 1px solid #ddd; background: #fff; }}
     .viewer-card {{ background: #fafafa; border: 1px solid #e5e5e5; border-radius: 12px; padding: 12px; }}
-    .viewer-card h2 {{ margin: 0 0 10px; font-size: 16px; }}
+    .viewer-card-head {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }}
+    .viewer-card h2 {{ margin: 0; font-size: 16px; }}
+    .viewer-status {{ margin: 0 0 10px; font-size: 13px; }}
     .viewer-3d {{ width: 100%; height: 360px; border: 2px solid #e2e8f0; border-radius: 12px; background: #f8fafc; overflow: hidden; }}
+    .viewer-3d.is-hidden {{ display: none; }}
+    .load-viewer-btn {{ border: none; color: #fff; cursor: pointer; font-size: 13px; font-weight: 600; background: linear-gradient(135deg, #475569 0%, #334155 100%); padding: 8px 12px; border-radius: 10px; transition: all 0.2s ease; }}
+    .load-viewer-btn:hover {{ transform: translateY(-1px); }}
+    .load-viewer-btn:disabled {{ background: #cbd5e1; cursor: not-allowed; transform: none; }}
     a {{ color: #0b57d0; text-decoration: none; }}
     .muted {{ color: #666; }}
     h2, h3 {{ margin: 0 0 10px; }}
@@ -1738,24 +2347,46 @@ def _render_case_page(
           <h2>3D Compare</h2>
           <div class="viewer-grid">
             <section class="viewer-card">
-              <h2>Source Model</h2>
-              <div id="viewer-source" class="viewer-3d"></div>
+              <div class="viewer-card-head">
+                <h2>Source Model</h2>
+                <button id="load-source-model" class="load-viewer-btn"{' disabled' if source_model_href is None else ''}>{html.escape(source_model_button_label)}</button>
+              </div>
+              <p id="status-source-model" class="viewer-status muted">{html.escape(source_model_status)}</p>
+              <div id="viewer-source" class="viewer-3d is-hidden"></div>
             </section>
             <section class="viewer-card">
-              <h2>Source VoxelMesh</h2>
-              <div id="viewer-source-voxelmesh" class="viewer-3d"></div>
+              <div class="viewer-card-head">
+                <h2>Final Edit</h2>
+                <button id="load-edit-model" class="load-viewer-btn"{' disabled' if edit_glb_href is None else ''}>{html.escape(edit_model_button_label)}</button>
+              </div>
+              <p id="status-edit-model" class="viewer-status muted">{html.escape(edit_model_status)}</p>
+              <div id="viewer-edit" class="viewer-3d is-hidden"></div>
+            </section>
+          </div>
+          <div class="viewer-grid">
+            <section class="viewer-card">
+              <div class="viewer-card-head">
+                <h2>Source VoxelMesh</h2>
+                <button id="load-source-voxelmesh" class="load-viewer-btn"{' disabled' if source_voxelmesh_href is None else ''}>{html.escape(source_voxelmesh_button_label)}</button>
+              </div>
+              <p id="status-source-voxelmesh" class="viewer-status muted">{html.escape(source_voxelmesh_status)}</p>
+              <div id="viewer-source-voxelmesh" class="viewer-3d is-hidden"></div>
             </section>
             <section class="viewer-card">
-              <h2>Source + Mask</h2>
-              <div id="viewer-combined" class="viewer-3d"></div>
+              <div class="viewer-card-head">
+                <h2>Source + Mask</h2>
+                <button id="load-combined" class="load-viewer-btn"{' disabled' if not combined_available else ''}>{html.escape(combined_button_label)}</button>
+              </div>
+              <p id="status-combined" class="viewer-status muted">{html.escape(combined_status)}</p>
+              <div id="viewer-combined" class="viewer-3d is-hidden"></div>
             </section>
             <section class="viewer-card">
-              <h2>SS Coords</h2>
-              <div id="viewer-ss-voxelmesh" class="viewer-3d"></div>
-            </section>
-            <section class="viewer-card">
-              <h2>Final Edit</h2>
-              <div id="viewer-edit" class="viewer-3d"></div>
+              <div class="viewer-card-head">
+                <h2>SS Coords</h2>
+                <button id="load-ss-voxelmesh" class="load-viewer-btn"{' disabled' if ss_voxelmesh_href is None else ''}>{html.escape(ss_voxelmesh_button_label)}</button>
+              </div>
+              <p id="status-ss-voxelmesh" class="viewer-status muted">{html.escape(ss_voxelmesh_status)}</p>
+              <div id="viewer-ss-voxelmesh" class="viewer-3d is-hidden"></div>
             </section>
           </div>
         </section>
@@ -1869,6 +2500,7 @@ def _render_case_page(
     function createViewer(containerId) {{
       const container = document.getElementById(containerId);
       if (!container) return null;
+      container.innerHTML = "";
       const scene = new THREE.Scene();
       scene.background = new THREE.Color(0xf8fafc);
       const camera = new THREE.PerspectiveCamera(75, container.clientWidth / container.clientHeight, 0.1, 1000);
@@ -1958,37 +2590,143 @@ def _render_case_page(
       }});
     }}
 
+    function setupLazyViewer({{ buttonId, statusId, containerId, available, loadingText, load }}) {{
+      const button = document.getElementById(buttonId);
+      const status = document.getElementById(statusId);
+      const container = document.getElementById(containerId);
+      if (!button || !status || !container) {{
+        return;
+      }}
+      if (!available) {{
+        button.disabled = true;
+        status.textContent = "Artifact unavailable.";
+        return;
+      }}
+
+      let loaded = false;
+      let loading = false;
+      button.addEventListener("click", async () => {{
+        if (loaded || loading) {{
+          return;
+        }}
+        loading = true;
+        button.disabled = true;
+        button.textContent = "Loading...";
+        status.textContent = loadingText;
+        container.classList.remove("is-hidden");
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+        try {{
+          await load();
+          loaded = true;
+          status.textContent = "Loaded on demand.";
+          button.textContent = "Loaded";
+        }} catch (error) {{
+          console.error("Failed to load lazy 3D viewer", containerId, error);
+          container.classList.add("is-hidden");
+          button.disabled = false;
+          button.textContent = "Load";
+          status.textContent = "Failed to load. Click to retry.";
+        }} finally {{
+          loading = false;
+        }}
+      }});
+    }}
+
     async function initViewers() {{
       try {{
-        const sourceViewer = createViewer("viewer-source");
-        const sourceVoxelViewer = createViewer("viewer-source-voxelmesh");
-        const combinedViewer = createViewer("viewer-combined");
-        const ssVoxelViewer = createViewer("viewer-ss-voxelmesh");
-        const editViewer = createViewer("viewer-edit");
-
-        const sourceModel = await loadGlb(sourceViewer, sourceModelHref);
-        if (sourceModel) sourceViewer.frameObject(sourceModel);
-
-        const sourceVoxelMesh = await loadGlb(sourceVoxelViewer, sourceVoxelmeshHref);
-        if (sourceVoxelMesh) sourceVoxelViewer.frameObject(sourceVoxelMesh);
-
-        let combinedFrameTarget = null;
-        const combinedSource = await loadGlb(combinedViewer, sourceModelHref);
-        if (combinedSource) combinedFrameTarget = combinedSource;
-        await loadGlb(combinedViewer, maskGlbHref, (node) => {{
-          node.material = new THREE.MeshPhongMaterial({{
-            color: 0xcccccc,
-            transparent: true,
-            opacity: 0.7,
-          }});
+        setupLazyViewer({{
+          buttonId: "load-source-model",
+          statusId: "status-source-model",
+          containerId: "viewer-source",
+          available: Boolean(sourceModelHref),
+          loadingText: "Loading source model...",
+          load: async () => {{
+            const sourceViewer = createViewer("viewer-source");
+            const sourceModel = await loadGlb(sourceViewer, sourceModelHref);
+            if (!sourceModel) {{
+              throw new Error("Source Model is unavailable");
+            }}
+            sourceViewer.frameObject(sourceModel);
+          }},
         }});
-        if (combinedFrameTarget) combinedViewer.frameObject(combinedFrameTarget);
 
-        const ssVoxelMesh = await loadGlb(ssVoxelViewer, ssVoxelmeshHref);
-        if (ssVoxelMesh) ssVoxelViewer.frameObject(ssVoxelMesh);
+        setupLazyViewer({{
+          buttonId: "load-edit-model",
+          statusId: "status-edit-model",
+          containerId: "viewer-edit",
+          available: Boolean(editGlbHref),
+          loadingText: "Loading final edit...",
+          load: async () => {{
+            const editViewer = createViewer("viewer-edit");
+            const editModel = await loadGlb(editViewer, editGlbHref);
+            if (!editModel) {{
+              throw new Error("Final Edit is unavailable");
+            }}
+            editViewer.frameObject(editModel);
+          }},
+        }});
 
-        const editModel = await loadGlb(editViewer, editGlbHref);
-        if (editModel) editViewer.frameObject(editModel);
+        setupLazyViewer({{
+          buttonId: "load-source-voxelmesh",
+          statusId: "status-source-voxelmesh",
+          containerId: "viewer-source-voxelmesh",
+          available: Boolean(sourceVoxelmeshHref),
+          loadingText: "Loading voxel mesh...",
+          load: async () => {{
+            const sourceVoxelViewer = createViewer("viewer-source-voxelmesh");
+            const sourceVoxelMesh = await loadGlb(sourceVoxelViewer, sourceVoxelmeshHref);
+            if (!sourceVoxelMesh) {{
+              throw new Error("Source VoxelMesh is unavailable");
+            }}
+            sourceVoxelViewer.frameObject(sourceVoxelMesh);
+          }},
+        }});
+
+        setupLazyViewer({{
+          buttonId: "load-combined",
+          statusId: "status-combined",
+          containerId: "viewer-combined",
+          available: Boolean(sourceModelHref || maskGlbHref),
+          loadingText: "Loading source model and mask...",
+          load: async () => {{
+            const combinedViewer = createViewer("viewer-combined");
+            let combinedFrameTarget = null;
+            const combinedSource = await loadGlb(combinedViewer, sourceModelHref);
+            if (combinedSource) {{
+              combinedFrameTarget = combinedSource;
+            }}
+            const combinedMask = await loadGlb(combinedViewer, maskGlbHref, (node) => {{
+              node.material = new THREE.MeshPhongMaterial({{
+                color: 0xcccccc,
+                transparent: true,
+                opacity: 0.7,
+              }});
+            }});
+            if (!combinedFrameTarget) {{
+              combinedFrameTarget = combinedMask;
+            }}
+            if (!combinedFrameTarget) {{
+              throw new Error("Source + Mask viewer is unavailable");
+            }}
+            combinedViewer.frameObject(combinedFrameTarget);
+          }},
+        }});
+
+        setupLazyViewer({{
+          buttonId: "load-ss-voxelmesh",
+          statusId: "status-ss-voxelmesh",
+          containerId: "viewer-ss-voxelmesh",
+          available: Boolean(ssVoxelmeshHref),
+          loadingText: "Loading SS coords...",
+          load: async () => {{
+            const ssVoxelViewer = createViewer("viewer-ss-voxelmesh");
+            const ssVoxelMesh = await loadGlb(ssVoxelViewer, ssVoxelmeshHref);
+            if (!ssVoxelMesh) {{
+              throw new Error("SS Coords are unavailable");
+            }}
+            ssVoxelViewer.frameObject(ssVoxelMesh);
+          }},
+        }});
       }} catch (error) {{
         console.error("Failed to initialize 3D viewers", error);
       }}
@@ -2351,11 +3089,23 @@ def _render_focus_case_page(
         source_id = f"viewer-source-{index}"
         combined_id = f"viewer-combined-{index}"
         edit_id = f"viewer-edit-{index}"
+        source_button_id = f"load-source-{index}"
+        source_status_id = f"status-source-{index}"
+        edit_button_id = f"load-edit-{index}"
+        edit_status_id = f"status-edit-{index}"
+        combined_button_id = f"load-combined-{index}"
+        combined_status_id = f"status-combined-{index}"
         viewer_specs.append(
             {
                 "sourceId": source_id,
+                "sourceButtonId": source_button_id,
+                "sourceStatusId": source_status_id,
                 "combinedId": combined_id,
+                "combinedButtonId": combined_button_id,
+                "combinedStatusId": combined_status_id,
                 "editId": edit_id,
+                "editButtonId": edit_button_id,
+                "editStatusId": edit_status_id,
                 "sourceHref": source_model_href,
                 "maskHref": mask_glb_href,
                 "editHref": run_entry.get("edit_glb_href"),
@@ -2381,9 +3131,23 @@ def _render_focus_case_page(
             "<section class='run-card'>"
             f"<div class='run-header'><div><h2>{html.escape(run_entry['label'])}</h2><p class='muted'>{html.escape(str(run_entry.get('group') or ''))}</p></div><div class='status'>{html.escape(str(run_entry.get('status') or 'unknown'))}</div></div>"
             "<div class='viewer-grid'>"
-            f"<section class='viewer-card'><h3>Source Model</h3><div id=\"{html.escape(source_id)}\" class='viewer-3d'></div></section>"
-            f"<section class='viewer-card'><h3>Source + Mask</h3><div id=\"{html.escape(combined_id)}\" class='viewer-3d'></div></section>"
-            f"<section class='viewer-card'><h3>Final Edit</h3><div id=\"{html.escape(edit_id)}\" class='viewer-3d'></div></section>"
+            "<section class='viewer-card'>"
+            f"<div class='viewer-card-head'><h3>Source Model</h3><button id=\"{html.escape(source_button_id)}\" class='load-viewer-btn'>{'Load' if source_model_href is not None else 'Unavailable'}</button></div>"
+            f"<p id=\"{html.escape(source_status_id)}\" class='viewer-status muted'>{'Loads on demand.' if source_model_href is not None else 'Artifact unavailable.'}</p>"
+            f"<div id=\"{html.escape(source_id)}\" class='viewer-3d is-hidden'></div>"
+            "</section>"
+            "<section class='viewer-card'>"
+            f"<div class='viewer-card-head'><h3>Final Edit</h3><button id=\"{html.escape(edit_button_id)}\" class='load-viewer-btn'>{'Load' if run_entry.get('edit_glb_href') else 'Unavailable'}</button></div>"
+            f"<p id=\"{html.escape(edit_status_id)}\" class='viewer-status muted'>{'Loads on demand.' if run_entry.get('edit_glb_href') else 'Artifact unavailable.'}</p>"
+            f"<div id=\"{html.escape(edit_id)}\" class='viewer-3d is-hidden'></div>"
+            "</section>"
+            "</div>"
+            "<div class='viewer-grid viewer-grid-secondary'>"
+            "<section class='viewer-card'>"
+            f"<div class='viewer-card-head'><h3>Source + Mask</h3><button id=\"{html.escape(combined_button_id)}\" class='load-viewer-btn'>{'Load' if (source_model_href is not None or mask_glb_href is not None) else 'Unavailable'}</button></div>"
+            f"<p id=\"{html.escape(combined_status_id)}\" class='viewer-status muted'>{'Loads on demand.' if (source_model_href is not None or mask_glb_href is not None) else 'Artifact unavailable.'}</p>"
+            f"<div id=\"{html.escape(combined_id)}\" class='viewer-3d is-hidden'></div>"
+            "</section>"
             "</div>"
             f"<div class='metric-sections'>{metric_cards}</div>"
             f"<div class='run-links'>{' · '.join(links)}</div>"
@@ -2407,11 +3171,13 @@ def _render_focus_case_page(
     .image-grid, .metric-grid, .viewer-grid, .metric-sections {{ display: grid; gap: 12px; }}
     .image-grid {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
     .viewer-grid {{ grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 12px; }}
+    .viewer-grid-secondary {{ grid-template-columns: repeat(1, minmax(0, 1fr)); }}
     .metric-grid {{ grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); margin-top: 12px; }}
     .metric-sections {{ margin-top: 12px; }}
     .run-card, .viewer-card, .metric {{ background: #fafafa; border: 1px solid #e5e5e5; border-radius: 12px; }}
     .run-card {{ padding: 14px; }}
     .viewer-card {{ padding: 12px; }}
+    .viewer-card-head {{ display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; }}
     .metric {{ padding: 12px 14px; }}
     .metric strong {{ display: block; font-size: 18px; margin-top: 4px; }}
     .metric small {{ display: block; margin-top: 6px; color: #666; font-size: 12px; }}
@@ -2428,6 +3194,11 @@ def _render_focus_case_page(
     .metric-more {{ margin-top: 12px; }}
     .metric-more > summary {{ cursor: pointer; color: #0b57d0; }}
     .viewer-3d {{ width: 100%; height: 300px; border: 2px solid #e2e8f0; border-radius: 12px; background: #f8fafc; overflow: hidden; }}
+    .viewer-3d.is-hidden {{ display: none; }}
+    .viewer-status {{ margin: 0 0 10px; font-size: 13px; }}
+    .load-viewer-btn {{ border: none; color: #fff; cursor: pointer; font-size: 13px; font-weight: 600; background: linear-gradient(135deg, #475569 0%, #334155 100%); padding: 8px 12px; border-radius: 10px; transition: all 0.2s ease; }}
+    .load-viewer-btn:hover {{ transform: translateY(-1px); }}
+    .load-viewer-btn:disabled {{ background: #cbd5e1; cursor: not-allowed; transform: none; }}
     .run-header {{ display: flex; justify-content: space-between; gap: 12px; align-items: center; }}
     .status {{ font-weight: 600; }}
     .run-links {{ margin-top: 12px; font-size: 13px; }}
@@ -2462,6 +3233,7 @@ def _render_focus_case_page(
     function createViewer(containerId) {{
       const container = document.getElementById(containerId);
       if (!container) return null;
+      container.innerHTML = "";
       const scene = new THREE.Scene();
       scene.background = new THREE.Color(0xf8fafc);
       const camera = new THREE.PerspectiveCamera(75, container.clientWidth / Math.max(container.clientHeight, 1), 0.1, 1000);
@@ -2551,42 +3323,116 @@ def _render_focus_case_page(
       }});
     }}
 
-    async function initViewerSet(spec) {{
-      const sourceViewer = createViewer(spec.sourceId);
-      const combinedViewer = createViewer(spec.combinedId);
-      const editViewer = createViewer(spec.editId);
-
-      const sourceModel = await loadGlb(sourceViewer, spec.sourceHref);
-      if (sourceModel) {{
-        sourceViewer.frameObject(sourceModel);
+    function setupLazyViewer({{ buttonId, statusId, containerId, available, loadingText, load }}) {{
+      const button = document.getElementById(buttonId);
+      const status = document.getElementById(statusId);
+      const container = document.getElementById(containerId);
+      if (!button || !status || !container) {{
+        return;
+      }}
+      if (!available) {{
+        button.disabled = true;
+        status.textContent = "Artifact unavailable.";
+        return;
       }}
 
-      let combinedFrameTarget = null;
-      const combinedSource = await loadGlb(combinedViewer, spec.sourceHref);
-      if (combinedSource) {{
-        combinedFrameTarget = combinedSource;
-      }}
-      await loadGlb(combinedViewer, spec.maskHref, (node) => {{
-        node.material = new THREE.MeshPhongMaterial({{
-          color: 0xcccccc,
-          transparent: true,
-          opacity: 0.7,
-        }});
+      let loaded = false;
+      let loading = false;
+      button.addEventListener("click", async () => {{
+        if (loaded || loading) {{
+          return;
+        }}
+        loading = true;
+        button.disabled = true;
+        button.textContent = "Loading...";
+        status.textContent = loadingText;
+        container.classList.remove("is-hidden");
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+        try {{
+          await load();
+          loaded = true;
+          status.textContent = "Loaded on demand.";
+          button.textContent = "Loaded";
+        }} catch (error) {{
+          console.error("Failed to initialize lazy viewer", containerId, error);
+          container.classList.add("is-hidden");
+          button.disabled = false;
+          button.textContent = "Load";
+          status.textContent = "Failed to load. Click to retry.";
+        }} finally {{
+          loading = false;
+        }}
       }});
-      if (combinedFrameTarget) {{
-        combinedViewer.frameObject(combinedFrameTarget);
-      }}
-
-      const editModel = await loadGlb(editViewer, spec.editHref);
-      if (editModel) {{
-        editViewer.frameObject(editModel);
-      }}
     }}
 
-    async function initAllViewers() {{
+    function initViewerSet(spec) {{
+      setupLazyViewer({{
+        buttonId: spec.sourceButtonId,
+        statusId: spec.sourceStatusId,
+        containerId: spec.sourceId,
+        available: Boolean(spec.sourceHref),
+        loadingText: "Loading source model...",
+        load: async () => {{
+          const sourceViewer = createViewer(spec.sourceId);
+          const sourceModel = await loadGlb(sourceViewer, spec.sourceHref);
+          if (!sourceModel) {{
+            throw new Error("Source Model is unavailable");
+          }}
+          sourceViewer.frameObject(sourceModel);
+        }},
+      }});
+
+      setupLazyViewer({{
+        buttonId: spec.editButtonId,
+        statusId: spec.editStatusId,
+        containerId: spec.editId,
+        available: Boolean(spec.editHref),
+        loadingText: "Loading final edit...",
+        load: async () => {{
+          const editViewer = createViewer(spec.editId);
+          const editModel = await loadGlb(editViewer, spec.editHref);
+          if (!editModel) {{
+            throw new Error("Final Edit is unavailable");
+          }}
+          editViewer.frameObject(editModel);
+        }},
+      }});
+
+      setupLazyViewer({{
+        buttonId: spec.combinedButtonId,
+        statusId: spec.combinedStatusId,
+        containerId: spec.combinedId,
+        available: Boolean(spec.sourceHref || spec.maskHref),
+        loadingText: "Loading source model and mask...",
+        load: async () => {{
+          const combinedViewer = createViewer(spec.combinedId);
+          let combinedFrameTarget = null;
+          const combinedSource = await loadGlb(combinedViewer, spec.sourceHref);
+          if (combinedSource) {{
+            combinedFrameTarget = combinedSource;
+          }}
+          const combinedMask = await loadGlb(combinedViewer, spec.maskHref, (node) => {{
+            node.material = new THREE.MeshPhongMaterial({{
+              color: 0xcccccc,
+              transparent: true,
+              opacity: 0.7,
+            }});
+          }});
+          if (!combinedFrameTarget) {{
+            combinedFrameTarget = combinedMask;
+          }}
+          if (!combinedFrameTarget) {{
+            throw new Error("Source + Mask viewer is unavailable");
+          }}
+          combinedViewer.frameObject(combinedFrameTarget);
+        }},
+      }});
+    }}
+
+    function initAllViewers() {{
       for (const spec of viewerSpecs) {{
         try {{
-          await initViewerSet(spec);
+          initViewerSet(spec);
         }} catch (error) {{
           console.error("Failed to initialize viewer set", spec, error);
         }}
