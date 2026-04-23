@@ -8,7 +8,7 @@ jobs:
       runtime.case_name: ablation4_01_full_steps_baseline
       batch.config_name: ablation4_01_full_steps_baseline
       batch.group: ablation4
-      batch.pred_root: /cache/wangxinxing/data/temp/ablation4/01_full_steps_baseline
+      batch.pred_root: /cache/wangxinxing/data/trellis_edit_benchmark/pred/ablation4/01_full_steps_baseline
       ss.inversion.inversion_steps: 25
       slat.inversion.inversion_steps: 25
 
@@ -18,7 +18,7 @@ jobs:
       runtime.case_name: ablation4_02_ss15_slat25
       batch.config_name: ablation4_02_ss15_slat25
       batch.group: ablation4
-      batch.pred_root: /cache/wangxinxing/data/temp/ablation4/02_ss15_slat25
+      batch.pred_root: /cache/wangxinxing/data/trellis_edit_benchmark/pred/ablation4/02_ss15_slat25
       ss.inversion.inversion_steps: 15
       slat.inversion.inversion_steps: 25
 
@@ -28,7 +28,7 @@ jobs:
       runtime.case_name: ablation4_03_ss25_slat15
       batch.config_name: ablation4_03_ss25_slat15
       batch.group: ablation4
-      batch.pred_root: /cache/wangxinxing/data/temp/ablation4/03_ss25_slat15
+      batch.pred_root: /cache/wangxinxing/data/trellis_edit_benchmark/pred/ablation4/03_ss25_slat15
       ss.inversion.inversion_steps: 25
       slat.inversion.inversion_steps: 15
 
@@ -38,7 +38,7 @@ jobs:
       runtime.case_name: ablation4_04_ss20_slat20
       batch.config_name: ablation4_04_ss20_slat20
       batch.group: ablation4
-      batch.pred_root: /cache/wangxinxing/data/temp/ablation4/04_ss20_slat20
+      batch.pred_root: /cache/wangxinxing/data/trellis_edit_benchmark/pred/ablation4/04_ss20_slat20
       ss.inversion.inversion_steps: 20
       slat.inversion.inversion_steps: 20
 
@@ -48,7 +48,7 @@ jobs:
       runtime.case_name: ablation4_05_ss15_slat15
       batch.config_name: ablation4_05_ss15_slat15
       batch.group: ablation4
-      batch.pred_root: /cache/wangxinxing/data/temp/ablation4/05_ss15_slat15
+      batch.pred_root: /cache/wangxinxing/data/trellis_edit_benchmark/pred/ablation4/05_ss15_slat15
       ss.inversion.inversion_steps: 15
       slat.inversion.inversion_steps: 15
 
@@ -58,6 +58,6 @@ jobs:
       runtime.case_name: ablation4_06_ss10_slat10
       batch.config_name: ablation4_06_ss10_slat10
       batch.group: ablation4
-      batch.pred_root: /cache/wangxinxing/data/temp/ablation4/06_ss10_slat10
+      batch.pred_root: /cache/wangxinxing/data/trellis_edit_benchmark/pred/ablation4/06_ss10_slat10
       ss.inversion.inversion_steps: 10
       slat.inversion.inversion_steps: 10

@@ -39,8 +39,8 @@ preprocess:
     max_scale: 1.5
     min_bbox_volume_delta: 0.02
     fallback_scale: 1.2
-    linear_bbox_slope: -0.2524674839565567
-    linear_bbox_intercept: 0.6333178020685066
+    linear_bbox_slope: 0.5449373200077813
+    linear_bbox_intercept: 0.29052836699859885
 
 ss:
   sampler:
@@ -49,7 +49,7 @@ ss:
     enabled: true
     denoise_init: inverted_terminal_noise
     solver: simple
-    predictor_corrector_steps: 0
+    refinement_steps: 0
   controls:
     p2p:
       enabled: false
@@ -76,7 +76,7 @@ slat:
     enabled: true
     denoise_init: terminal_noise
     solver: simple
-    predictor_corrector_steps: 0
+    refinement_steps: 0
   controls:
     p2p:
       enabled: false
@@ -99,7 +99,7 @@ batch:
   group: ablation2
   gt_root: /cache/wangxinxing/data/trellis_edit_benchmark/edit3d_data/data
   assets_root: /cache/wangxinxing/data/trellis_edit_benchmark/edit3d_data/renders
-  pred_root: /cache/wangxinxing/data/temp/ablation2/05_pre_fixed_scale_1p20
+  pred_root: /cache/wangxinxing/data/trellis_edit_benchmark/pred/ablation2/05_pre_fixed_scale_1p20
   max_cases: 12
   metrics: [psnr, ssim, lpips, fid, dino_if_max, dino_if_mean, chamfer, clip_t]
   skip_benchmark_render: false

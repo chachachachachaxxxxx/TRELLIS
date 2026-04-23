@@ -1,54 +1,36 @@
-# ============================================================
-# ablation1 / 方法 5: SS inversion + kv + latent + SLAT inversion + latent
-# ============================================================
-
 entrypoint: edit_full
 
 runtime:
-  case_name: ablation1_05_ss_inversion_kv_latent__slat_inversion_latent
   model: microsoft/TRELLIS-image-large
-  seed: 1
+  seed: 42
   device: cuda:0
-  output_root: outputs
-  num_samples: 1
+  attn_backend: sdpa
+  sparse_attn_backend: flash_attn
   spconv_algo: native
   skip_render: true
   skip_glb: false
   skip_ply: false
-  save_source_outputs: false
-
-inputs:
-  source_image: assets/edit_example/images/2d_render.png
-  edit_image: assets/edit_example/images/2d_edit.png
-  mask_image: assets/edit_example/images/2d_mask.png
-  mask_glb: assets/edit_example/mask.glb
-  source_voxels: assets/edit_example/voxels.ply
-  source_features: assets/edit_example/features.npz
-  edited_coords: ""
 
 preprocess:
-  style: shared
+  style: voxhammer
   crop_policy: union_crop
   mask_policy: provided
   adaptive_foreground_scale:
-    enabled: true
-    strategy: global_linear
-    probe_scales: [1.10, 1.35]
-    min_scale: 1.0
-    max_scale: 1.5
-    min_bbox_volume_delta: 0.02
-    fallback_scale: 1.2
-    linear_bbox_slope: 0.5449373200077813
-    linear_bbox_intercept: 0.29052836699859885
+    enabled: false
 
 ss:
+  method: controlled_denoise
   sampler:
     steps: 25
   inversion:
     enabled: true
     denoise_init: inverted_terminal_noise
-    solver: simple
+    solver: rf_solver
     refinement_steps: 0
+    denoise_cfg_strength: 6.0
+    denoise_cfg_interval: [0.5, 1.0]
+    inversion_cfg_strength: 5.0
+    inversion_cfg_interval: [0.5, 1.0]
   controls:
     p2p:
       enabled: false
@@ -58,10 +40,21 @@ ss:
       t_end: 0.0
       self_attention: true
       cross_attention: true
+      source_bundle_mode: solver_aligned
+      edit_region_mode: preserve_complement
+      soft_mask:
+        enabled: false
+        dilation: 2
+        sigma: 1.0
     latent_blend:
       enabled: true
       strength: 1.0
       hard_mask_mode: edit_all
+      edit_region_mode: preserve_complement
+      soft_mask:
+        enabled: false
+        dilation: 2
+        sigma: 1.0
     uniedit:
       enabled: false
   output:
@@ -69,20 +62,39 @@ ss:
     save_voxel_mesh: true
 
 slat:
+  method: controlled_denoise
   sampler:
     steps: 25
   inversion:
     enabled: true
     denoise_init: terminal_noise
-    solver: simple
+    scope: preserve_only
+    solver: rf_solver
     refinement_steps: 0
+    denoise_cfg_strength: 0.0
+    denoise_cfg_interval: [0.5, 1.0]
+    inversion_cfg_strength: 0.0
+    inversion_cfg_interval: [0.5, 1.0]
   controls:
     p2p:
       enabled: false
     kv_blend:
-      enabled: false
+      enabled: true
+      t_start: 1.0
+      t_end: 0.0
+      self_attention: true
+      cross_attention: true
+      source_bundle_mode: solver_aligned
+      soft_mask:
+        enabled: false
+        dilation: 2
+        sigma: 1.0
     latent_blend:
       enabled: true
+      soft_mask:
+        enabled: false
+        dilation: 2
+        sigma: 1.0
     uniedit:
       enabled: false
   decode:
@@ -90,13 +102,21 @@ slat:
     modes: [gaussian, mesh]
 
 batch:
-  config_name: ablation1_05_ss_inversion_kv_latent__slat_inversion_latent
-  group: ablation1
+  config_name: voxhammer_ablation_06_internal_rf_solver_same_step_kv
+  group: voxhammer_ablations
   gt_root: /cache/wangxinxing/data/trellis_edit_benchmark/edit3d_data/data
   assets_root: /cache/wangxinxing/data/trellis_edit_benchmark/edit3d_data/renders
-  pred_root: /cache/wangxinxing/data/trellis_edit_benchmark/pred/ablation1/05_ss_inversion_kv_latent__slat_inversion_latent
+  pred_root: /cache/wangxinxing/data/trellis_edit_benchmark/pred/voxhammer_ablation_06_internal_rf_solver_same_step_kv
   max_cases: 12
-  metrics: [psnr, ssim, lpips, fid, dino_if_max, dino_if_mean, chamfer, clip_t]
+  metrics:
+    - psnr
+    - ssim
+    - lpips
+    - fid
+    - dino_if_max
+    - dino_if_mean
+    - chamfer
+    - clip_t
   skip_benchmark_render: false
   skip_exists: false
   keep_case_outputs: false

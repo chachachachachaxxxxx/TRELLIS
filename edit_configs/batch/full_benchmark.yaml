@@ -1,5 +1,5 @@
 # ============================================================
-# 完整批量评测示例：P2P 全流程；latent blend 由 stage 配置单独控制
+# 完整批量评测示例：controlled_denoise 主干 + P2P control；latent blend 由 stage 配置单独控制
 #
 # 用法:
 #   python run_batch_edit_and_eval.py --config edit_configs/batch/full_benchmark.yaml
@@ -21,6 +21,7 @@ preprocess:
   mask_policy: provided
 
 ss:
+  method: controlled_denoise
   sampler:
     steps: 25
   inversion:
@@ -45,6 +46,7 @@ ss:
     save_voxel_mesh: true
 
 slat:
+  method: controlled_denoise
   sampler:
     steps: 25
   inversion:
@@ -66,7 +68,7 @@ batch:
   config_name: full_benchmark
   gt_root: /cache/wangxinxing/data/trellis_edit_benchmark/edit3d_data/data
   assets_root: /cache/wangxinxing/data/trellis_edit_benchmark/edit3d_data/renders
-  pred_root: /cache/wangxinxing/data/temp/p2p_latent_blend_full_benchmark
+  pred_root: /cache/wangxinxing/data/trellis_edit_benchmark/pred/controlled_denoise_full_benchmark
   # dataset: GSO
   # max_cases: 50
   metrics:

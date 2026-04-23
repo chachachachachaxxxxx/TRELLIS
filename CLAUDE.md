@@ -103,7 +103,7 @@ outputs/<entrypoint>/<case_name>/
 批量评测预测树默认输出到：
 
 ```text
-/cache/wangxinxing/data/temp/<entrypoint>_<config_name>/
+/cache/wangxinxing/data/trellis_edit_benchmark/pred/<entrypoint>_<config_name>/
 ```
 
 ## 代码修改规则

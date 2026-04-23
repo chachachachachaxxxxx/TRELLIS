@@ -34,8 +34,8 @@ preprocess:
     max_scale: 1.5
     min_bbox_volume_delta: 0.02
     fallback_scale: 1.2
-    linear_bbox_slope: -0.2524674839565567
-    linear_bbox_intercept: 0.6333178020685066
+    linear_bbox_slope: 0.5449373200077813
+    linear_bbox_intercept: 0.29052836699859885
 
 ss:
   method: anchorflow
@@ -47,7 +47,7 @@ ss:
     enabled: false
     denoise_init: random_noise
     solver: simple
-    predictor_corrector_steps: 0
+    refinement_steps: 0
     inversion_steps: null
     denoise_cfg_strength: 5.0
     denoise_cfg_interval: [0.5, 1.0]
@@ -87,7 +87,7 @@ slat:
     denoise_init: random_noise
     scope: full_source
     solver: simple
-    predictor_corrector_steps: 0
+    refinement_steps: 0
     inversion_steps: null
     denoise_cfg_strength: null
     denoise_cfg_interval: null

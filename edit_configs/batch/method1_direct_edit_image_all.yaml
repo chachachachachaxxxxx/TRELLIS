@@ -65,6 +65,7 @@ slat:
 
 batch:
   config_name: method1_direct_edit_image_all
+  group: basic_baselines
   gt_root: /cache/wangxinxing/data/trellis_edit_benchmark/edit3d_data/data
   pred_root: /cache/wangxinxing/data/trellis_edit_benchmark/pred/baseline1_trellis_direct_edit_by_image
   metrics:

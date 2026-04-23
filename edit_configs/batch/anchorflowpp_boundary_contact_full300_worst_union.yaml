@@ -26,8 +26,8 @@ preprocess:
     max_scale: 1.5
     min_bbox_volume_delta: 0.02
     fallback_scale: 1.2
-    linear_bbox_slope: -0.2524674839565567
-    linear_bbox_intercept: 0.6333178020685066
+    linear_bbox_slope: 0.5449373200077813
+    linear_bbox_intercept: 0.29052836699859885
 
 ss:
   method: anchorflow
@@ -39,7 +39,7 @@ ss:
     enabled: false
     denoise_init: random_noise
     solver: simple
-    predictor_corrector_steps: 0
+    refinement_steps: 0
     inversion_steps: null
     denoise_cfg_strength: 5.0
     denoise_cfg_interval: [0.5, 1.0]
@@ -79,7 +79,7 @@ slat:
     denoise_init: random_noise
     scope: full_source
     solver: simple
-    predictor_corrector_steps: 0
+    refinement_steps: 0
     inversion_steps: null
     denoise_cfg_strength: null
     denoise_cfg_interval: null
@@ -97,7 +97,7 @@ batch:
   group: problem_driven
   gt_root: /cache/wangxinxing/data/trellis_edit_benchmark/edit3d_data/data
   assets_root: /cache/wangxinxing/data/trellis_edit_benchmark/edit3d_data/renders
-  pred_root: /cache/wangxinxing/data/temp/anchorflowpp_boundary_contact_full300_worst_union
+  pred_root: /cache/wangxinxing/data/trellis_edit_benchmark/pred/anchorflowpp_boundary_contact_full300_worst_union
   gpus: "0"
   selected_cases_file: ../case_sets/boundary_contact_full300_worst_union.yaml
   metrics: [psnr, ssim, lpips, fid, dino_if_max, dino_if_mean, chamfer, clip_t]

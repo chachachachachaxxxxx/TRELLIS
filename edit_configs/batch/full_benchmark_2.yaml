@@ -56,7 +56,7 @@ batch:
   config_name: uniedit_full_benchmark
   gt_root: /cache/wangxinxing/data/trellis_edit_benchmark/edit3d_data/data
   assets_root: /cache/wangxinxing/data/trellis_edit_benchmark/edit3d_data/renders
-  pred_root: /cache/wangxinxing/data/temp/uniedit_full_benchmark
+  pred_root: /cache/wangxinxing/data/trellis_edit_benchmark/pred/uniedit_full_benchmark
   metrics:
     - psnr
     - ssim

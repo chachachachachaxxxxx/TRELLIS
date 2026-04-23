@@ -1,12 +1,3 @@
-# ============================================================
-# VoxHammer baseline: 前 12 条案例
-#
-# 复原自历史 voxhammer batch 配置：
-# - preprocess.style = voxhammer
-# - SS: rf_solver + kv_blend + latent_blend
-# - SLAT: rf_solver + preserve_only inversion + kv_blend + latent_blend
-# ============================================================
-
 entrypoint: edit_full
 
 runtime:
@@ -28,13 +19,14 @@ preprocess:
     enabled: false
 
 ss:
+  method: controlled_denoise
   sampler:
     steps: 25
   inversion:
     enabled: true
     denoise_init: inverted_terminal_noise
-    solver: rf_solver
-    predictor_corrector_steps: 0
+    solver: voxhammer_rf_solver
+    refinement_steps: 0
     denoise_cfg_strength: 6.0
     denoise_cfg_interval: [0.5, 1.0]
     inversion_cfg_strength: 5.0
@@ -48,6 +40,8 @@ ss:
       t_end: 0.0
       self_attention: true
       cross_attention: true
+      source_bundle_mode: external_voxhammer
+      edit_region_mode: preserve_complement
       soft_mask:
         enabled: false
         dilation: 2
@@ -56,6 +50,7 @@ ss:
       enabled: true
       strength: 1.0
       hard_mask_mode: edit_all
+      edit_region_mode: preserve_complement
       soft_mask:
         enabled: false
         dilation: 2
@@ -67,14 +62,15 @@ ss:
     save_voxel_mesh: true
 
 slat:
+  method: controlled_denoise
   sampler:
     steps: 25
   inversion:
     enabled: true
     denoise_init: terminal_noise
     scope: preserve_only
-    solver: rf_solver
-    predictor_corrector_steps: 0
+    solver: voxhammer_rf_solver
+    refinement_steps: 0
     denoise_cfg_strength: 0.0
     denoise_cfg_interval: [0.5, 1.0]
     inversion_cfg_strength: 0.0
@@ -88,6 +84,7 @@ slat:
       t_end: 0.0
       self_attention: true
       cross_attention: true
+      source_bundle_mode: external_voxhammer
       soft_mask:
         enabled: false
         dilation: 2
@@ -105,11 +102,11 @@ slat:
     modes: [gaussian, mesh]
 
 batch:
-  config_name: voxhammer_first12
-  group: other_methods
+  config_name: voxhammer_ablation_01_internal_baseline
+  group: voxhammer_ablations
   gt_root: /cache/wangxinxing/data/trellis_edit_benchmark/edit3d_data/data
   assets_root: /cache/wangxinxing/data/trellis_edit_benchmark/edit3d_data/renders
-  pred_root: /cache/wangxinxing/data/temp/voxhammer_first12
+  pred_root: /cache/wangxinxing/data/trellis_edit_benchmark/pred/voxhammer_ablation_01_internal_baseline
   max_cases: 12
   metrics:
     - psnr
