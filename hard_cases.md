@@ -1,0 +1,3 @@
+PartObjaverse-Tiny/02e777bdc5114b148963ed3def6ad471/prompt_3
+PartObjaverse-Tiny/25a32b2b119948c3b905a21db1098f45/prompt_3
+PartObjaverse-Tiny/b3a58da30f464dbba1c53c7f3cbedec9/prompt_3
