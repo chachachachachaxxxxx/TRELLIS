@@ -20,7 +20,7 @@ from .foreground_scale_selection import (
     compute_active_bbox,
     compute_sparse_structure_metrics,
     normalize_sparse_coords,
-    select_crop_scale_from_linear_fit,
+    select_crop_scale_from_linearized_size_fit,
     select_crop_scale_from_probes,
 )
 from .image_alignment import (
@@ -79,7 +79,7 @@ __all__ = [
     "save_edit_condition_artifacts",
     "save_preprocessed_inputs",
     "scale_image",
-    "select_crop_scale_from_linear_fit",
+    "select_crop_scale_from_linearized_size_fit",
     "select_crop_scale_from_probes",
     "sparse_batch_slice",
 ]

@@ -13,6 +13,9 @@ class ActiveBBox:
     y_min: int
     x_max: int
     y_max: int
+    width: int
+    height: int
+    area: int
     center_x: float
     center_y: float
     base_span: int
@@ -30,11 +33,16 @@ def compute_active_bbox(mask: np.ndarray) -> ActiveBBox:
     y_min = int(coords[:, 0].min())
     x_max = int(coords[:, 1].max())
     y_max = int(coords[:, 0].max())
+    width = int(x_max - x_min + 1)
+    height = int(y_max - y_min + 1)
     return ActiveBBox(
         x_min=x_min,
         y_min=y_min,
         x_max=x_max,
         y_max=y_max,
+        width=width,
+        height=height,
+        area=int(width * height),
         center_x=(x_min + x_max) / 2.0,
         center_y=(y_min + y_max) / 2.0,
         base_span=max(x_max - x_min, y_max - y_min, 1),
@@ -124,9 +132,11 @@ def compute_sparse_structure_metrics(
     return metrics
 
 
-def select_crop_scale_from_linear_fit(
+def select_crop_scale_from_linearized_size_fit(
     *,
     target_bbox_volume_ratio: float,
+    source_bbox: ActiveBBox,
+    active_bbox: ActiveBBox,
     slope: float,
     intercept: float,
     fallback_scale: float,
@@ -137,23 +147,68 @@ def select_crop_scale_from_linear_fit(
     if abs(float(slope)) < 1e-8:
         return selected_default, {
             "mode": "fixed_default",
-            "reason": "global_linear_slope_too_small",
+            "reason": "global_linearized_size_slope_too_small",
+            "selected_scale": selected_default,
+        }
+    if source_bbox.area <= 0 or active_bbox.base_span <= 0:
+        return selected_default, {
+            "mode": "fixed_default",
+            "reason": "invalid_bbox_geometry_for_linearized_size_fit",
             "selected_scale": selected_default,
         }
 
-    raw_scale = (float(target_bbox_volume_ratio) - float(intercept)) / float(slope)
+    target_bbox_volume_linear_ratio = float(np.cbrt(float(target_bbox_volume_ratio)))
+    target_proc_bbox_linear_ratio = (
+        target_bbox_volume_linear_ratio - float(intercept)
+    ) / float(slope)
+    source_proc_bbox_linear_numerator = float(np.sqrt(float(source_bbox.area)) / float(active_bbox.base_span))
+
+    if not np.isfinite(target_proc_bbox_linear_ratio) or target_proc_bbox_linear_ratio <= 0.0:
+        selected_scale = float(max_scale)
+        predicted_proc_bbox_linear_ratio = float(source_proc_bbox_linear_numerator / selected_scale)
+        predicted_bbox_volume_linear_ratio = float(intercept + float(slope) * predicted_proc_bbox_linear_ratio)
+        return selected_scale, {
+            "mode": "global_linear",
+            "reason": "target_below_linearized_size_fit_range",
+            "selected_scale": selected_scale,
+            "raw_selected_scale": None,
+            "target_bbox_volume_ratio": float(target_bbox_volume_ratio),
+            "target_bbox_volume_linear_ratio": target_bbox_volume_linear_ratio,
+            "target_proc_bbox_linear_ratio": float(target_proc_bbox_linear_ratio),
+            "source_bbox_area": int(source_bbox.area),
+            "source_proc_bbox_linear_numerator": source_proc_bbox_linear_numerator,
+            "active_bbox_base_span": int(active_bbox.base_span),
+            "predicted_proc_bbox_linear_ratio": predicted_proc_bbox_linear_ratio,
+            "predicted_bbox_volume_linear_ratio": predicted_bbox_volume_linear_ratio,
+            "predicted_bbox_volume_ratio": float(predicted_bbox_volume_linear_ratio ** 3),
+            "linearized_size_slope": float(slope),
+            "linearized_size_intercept": float(intercept),
+        }
+
+    raw_scale = float(source_proc_bbox_linear_numerator / float(target_proc_bbox_linear_ratio))
     selected_scale = float(np.clip(raw_scale, min_scale, max_scale))
-    reason = "target_outside_linear_fit_range"
+    reason = "target_outside_linearized_size_fit_range"
     if min_scale <= raw_scale <= max_scale:
-        reason = "target_mapped_by_global_linear_fit"
+        reason = "target_mapped_by_global_linearized_size_fit"
+
+    predicted_proc_bbox_linear_ratio = float(source_proc_bbox_linear_numerator / selected_scale)
+    predicted_bbox_volume_linear_ratio = float(intercept + float(slope) * predicted_proc_bbox_linear_ratio)
     return selected_scale, {
         "mode": "global_linear",
         "reason": reason,
         "selected_scale": selected_scale,
-        "raw_selected_scale": float(raw_scale),
+        "raw_selected_scale": raw_scale,
         "target_bbox_volume_ratio": float(target_bbox_volume_ratio),
-        "linear_bbox_slope": float(slope),
-        "linear_bbox_intercept": float(intercept),
+        "target_bbox_volume_linear_ratio": target_bbox_volume_linear_ratio,
+        "target_proc_bbox_linear_ratio": float(target_proc_bbox_linear_ratio),
+        "source_bbox_area": int(source_bbox.area),
+        "source_proc_bbox_linear_numerator": source_proc_bbox_linear_numerator,
+        "active_bbox_base_span": int(active_bbox.base_span),
+        "predicted_proc_bbox_linear_ratio": predicted_proc_bbox_linear_ratio,
+        "predicted_bbox_volume_linear_ratio": predicted_bbox_volume_linear_ratio,
+        "predicted_bbox_volume_ratio": float(predicted_bbox_volume_linear_ratio ** 3),
+        "linearized_size_slope": float(slope),
+        "linearized_size_intercept": float(intercept),
     }
 
 
@@ -172,6 +227,7 @@ def select_crop_scale_from_probes(
         for result in probe_results
         if np.isfinite(float(result.get("crop_scale", np.nan)))
         and np.isfinite(float(result.get("bbox_volume_ratio", np.nan)))
+        and np.isfinite(float(result.get("proc_fg_bbox_linear_ratio", np.nan)))
     ]
     finite_probe_results.sort(key=lambda item: float(item["crop_scale"]))
 
@@ -188,21 +244,47 @@ def select_crop_scale_from_probes(
     high_scale = float(high["crop_scale"])
     low_bbox = float(low["bbox_volume_ratio"])
     high_bbox = float(high["bbox_volume_ratio"])
+    low_bbox_linear = float(np.cbrt(low_bbox))
+    high_bbox_linear = float(np.cbrt(high_bbox))
+    low_proc_bbox_linear = float(low["proc_fg_bbox_linear_ratio"])
+    high_proc_bbox_linear = float(high["proc_fg_bbox_linear_ratio"])
     delta_bbox = high_bbox - low_bbox
+    delta_bbox_linear = high_bbox_linear - low_bbox_linear
+    delta_proc_bbox_linear = high_proc_bbox_linear - low_proc_bbox_linear
+    probe_scale_numerator_candidates = [
+        low_proc_bbox_linear * low_scale,
+        high_proc_bbox_linear * high_scale,
+    ]
+    probe_scale_numerator = float(np.mean(probe_scale_numerator_candidates))
+    target_bbox_linear = float(np.cbrt(float(target_bbox_volume_ratio)))
 
     probe_meta = {
         "target_bbox_volume_ratio": float(target_bbox_volume_ratio),
+        "target_bbox_volume_linear_ratio": target_bbox_linear,
         "low_probe_scale": low_scale,
         "low_probe_bbox_volume_ratio": low_bbox,
+        "low_probe_bbox_volume_linear_ratio": low_bbox_linear,
+        "low_probe_proc_bbox_linear_ratio": low_proc_bbox_linear,
         "high_probe_scale": high_scale,
         "high_probe_bbox_volume_ratio": high_bbox,
+        "high_probe_bbox_volume_linear_ratio": high_bbox_linear,
+        "high_probe_proc_bbox_linear_ratio": high_proc_bbox_linear,
         "probe_bbox_volume_delta": float(delta_bbox),
+        "probe_bbox_volume_linear_delta": float(delta_bbox_linear),
+        "probe_proc_bbox_linear_delta": float(delta_proc_bbox_linear),
+        "probe_scale_numerator": probe_scale_numerator,
     }
 
-    if abs(delta_bbox) < float(min_bbox_volume_delta):
+    if (
+        abs(delta_bbox) < float(min_bbox_volume_delta)
+        or abs(delta_bbox_linear) < 1e-8
+        or abs(delta_proc_bbox_linear) < 1e-8
+        or not np.isfinite(probe_scale_numerator)
+        or probe_scale_numerator <= 0.0
+    ):
         closest = min(
             finite_probe_results,
-            key=lambda item: abs(float(item["bbox_volume_ratio"]) - target_bbox_volume_ratio),
+            key=lambda item: abs(float(np.cbrt(float(item["bbox_volume_ratio"]))) - target_bbox_linear),
         )
         selected_scale = float(np.clip(float(closest["crop_scale"]), min_scale, max_scale))
         return selected_scale, {
@@ -212,10 +294,10 @@ def select_crop_scale_from_probes(
             "selected_scale": selected_scale,
         }
 
-    if delta_bbox >= 0:
+    if delta_bbox >= 0 or delta_bbox_linear >= 0 or delta_proc_bbox_linear >= 0:
         closest = min(
             finite_probe_results,
-            key=lambda item: abs(float(item["bbox_volume_ratio"]) - target_bbox_volume_ratio),
+            key=lambda item: abs(float(np.cbrt(float(item["bbox_volume_ratio"]))) - target_bbox_linear),
         )
         selected_scale = float(np.clip(float(closest["crop_scale"]), min_scale, max_scale))
         return selected_scale, {
@@ -225,19 +307,45 @@ def select_crop_scale_from_probes(
             "selected_scale": selected_scale,
         }
 
-    raw_scale = low_scale + (target_bbox_volume_ratio - low_bbox) * (high_scale - low_scale) / delta_bbox
+    target_proc_bbox_linear_ratio = (
+        low_proc_bbox_linear
+        + (target_bbox_linear - low_bbox_linear) * delta_proc_bbox_linear / delta_bbox_linear
+    )
+    if not np.isfinite(target_proc_bbox_linear_ratio) or target_proc_bbox_linear_ratio <= 0.0:
+        closest = min(
+            finite_probe_results,
+            key=lambda item: abs(float(np.cbrt(float(item["bbox_volume_ratio"]))) - target_bbox_linear),
+        )
+        selected_scale = float(np.clip(float(closest["crop_scale"]), min_scale, max_scale))
+        return selected_scale, {
+            **probe_meta,
+            "mode": "closest_probe",
+            "reason": "invalid_target_proc_bbox_linear_ratio",
+            "selected_scale": selected_scale,
+        }
+
+    raw_scale = float(probe_scale_numerator / target_proc_bbox_linear_ratio)
     selected_scale = float(np.clip(raw_scale, min_scale, max_scale))
-    if low_scale <= raw_scale <= high_scale:
+    if high_bbox_linear <= target_bbox_linear <= low_bbox_linear:
         mode = "interpolate"
         reason = "target_bracketed_by_probes"
     else:
         mode = "clamped_extrapolate"
         reason = "target_outside_probe_range"
 
+    predicted_proc_bbox_linear_ratio = float(probe_scale_numerator / selected_scale)
+    predicted_bbox_volume_linear_ratio = float(
+        low_bbox_linear
+        + (predicted_proc_bbox_linear_ratio - low_proc_bbox_linear) * delta_bbox_linear / delta_proc_bbox_linear
+    )
     return selected_scale, {
         **probe_meta,
         "mode": mode,
         "reason": reason,
-        "raw_selected_scale": float(raw_scale),
+        "target_proc_bbox_linear_ratio": float(target_proc_bbox_linear_ratio),
+        "predicted_proc_bbox_linear_ratio": predicted_proc_bbox_linear_ratio,
+        "predicted_bbox_volume_linear_ratio": predicted_bbox_volume_linear_ratio,
+        "predicted_bbox_volume_ratio": float(predicted_bbox_volume_linear_ratio ** 3),
+        "raw_selected_scale": raw_scale,
         "selected_scale": selected_scale,
     }

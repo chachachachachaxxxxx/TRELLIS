@@ -295,8 +295,15 @@ SS_VALIDATION_RULES: tuple[ValidationRule, ...] = (
         message="{label}.controls.uniedit currently requires {label}.inversion.enabled=true.",
     ),
     ValidationRule(
-        when=(ConditionSpec("inversion.predictor_corrector_steps", "lt", 0),),
-        message="{label}.inversion.predictor_corrector_steps must be >= 0.",
+        when=(
+            ConditionSpec("inversion.enabled", "eq", False),
+            ConditionSpec("inversion.refinement_steps", "gt", 0),
+        ),
+        message="{label}.inversion.refinement_steps requires {label}.inversion.enabled=true.",
+    ),
+    ValidationRule(
+        when=(ConditionSpec("inversion.refinement_steps", "lt", 0),),
+        message="{label}.inversion.refinement_steps must be >= 0.",
     ),
     ValidationRule(
         when=(
@@ -453,8 +460,15 @@ SLAT_VALIDATION_RULES: tuple[ValidationRule, ...] = (
         message="{label}.inversion.scope='preserve_only' requires {label}.inversion.enabled=true.",
     ),
     ValidationRule(
-        when=(ConditionSpec("inversion.predictor_corrector_steps", "lt", 0),),
-        message="{label}.inversion.predictor_corrector_steps must be >= 0.",
+        when=(
+            ConditionSpec("inversion.enabled", "eq", False),
+            ConditionSpec("inversion.refinement_steps", "gt", 0),
+        ),
+        message="{label}.inversion.refinement_steps requires {label}.inversion.enabled=true.",
+    ),
+    ValidationRule(
+        when=(ConditionSpec("inversion.refinement_steps", "lt", 0),),
+        message="{label}.inversion.refinement_steps must be >= 0.",
     ),
     ValidationRule(
         when=(

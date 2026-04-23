@@ -99,16 +99,17 @@ class UniEditRFSolver(RFSolverSampler):
         self,
         model,
         sample,
-        t_value: float,
+        actual_t: float,
+        logical_t: float,
         cond: torch.Tensor,
         neg_cond: torch.Tensor,
         cfg_strength: float,
         cfg_interval: Tuple[float, float],
     ):
         """Compute CFG-guided prediction for a single condition."""
-        if cfg_interval[0] <= t_value <= cfg_interval[1] and cfg_strength > 0.0:
+        if cfg_interval[0] <= logical_t <= cfg_interval[1] and cfg_strength > 0.0:
             # Compute positive prediction
-            pred = self._run_model(model, sample, t_value, cond)
+            pred = self._run_model(model, sample, actual_t, cond)
 
             # Clean up before negative prediction
             import gc
@@ -117,7 +118,7 @@ class UniEditRFSolver(RFSolverSampler):
                 torch.cuda.empty_cache()
 
             # Compute negative prediction
-            neg_pred = self._run_model(model, sample, t_value, neg_cond)
+            neg_pred = self._run_model(model, sample, actual_t, neg_cond)
 
             # Compute CFG result
             result = (1.0 + cfg_strength) * pred - cfg_strength * neg_pred
@@ -129,14 +130,15 @@ class UniEditRFSolver(RFSolverSampler):
                 torch.cuda.empty_cache()
 
             return result
-        return self._run_model(model, sample, t_value, cond)
+        return self._run_model(model, sample, actual_t, cond)
 
     @torch.no_grad()
     def _merged_prediction(
         self,
         model,
         sample,
-        t_value: float,
+        actual_t: float,
+        logical_t: float,
         source_cond: torch.Tensor,
         target_cond: torch.Tensor,
         neg_cond: torch.Tensor,
@@ -168,7 +170,8 @@ class UniEditRFSolver(RFSolverSampler):
         pred_tgt = self._guided_prediction_for_cond(
             model=model,
             sample=sample,
-            t_value=t_value,
+            actual_t=actual_t,
+            logical_t=logical_t,
             cond=target_cond,
             neg_cond=neg_cond,
             cfg_strength=cfg_strength,
@@ -187,7 +190,8 @@ class UniEditRFSolver(RFSolverSampler):
         pred_src = self._guided_prediction_for_cond(
             model=model,
             sample=sample,
-            t_value=t_value,
+            actual_t=actual_t,
+            logical_t=logical_t,
             cond=source_cond,
             neg_cond=neg_cond,
             cfg_strength=cfg_strength,
@@ -217,6 +221,7 @@ class UniEditRFSolver(RFSolverSampler):
         sample,
         t_curr: float,
         t_next: float,
+        logical_t: float,
         source_cond: torch.Tensor,
         target_cond: torch.Tensor,
         neg_cond: torch.Tensor,
@@ -231,7 +236,8 @@ class UniEditRFSolver(RFSolverSampler):
         pred = self._merged_prediction(
             model=model,
             sample=sample,
-            t_value=t_curr,
+            actual_t=t_curr,
+            logical_t=logical_t,
             source_cond=source_cond,
             target_cond=target_cond,
             neg_cond=neg_cond,
@@ -257,7 +263,8 @@ class UniEditRFSolver(RFSolverSampler):
         pred_mid = self._merged_prediction(
             model=model,
             sample=sample_mid,
-            t_value=t_mid,
+            actual_t=t_mid,
+            logical_t=logical_t,
             source_cond=source_cond,
             target_cond=target_cond,
             neg_cond=neg_cond,
@@ -334,11 +341,13 @@ class UniEditRFSolver(RFSolverSampler):
         }
 
         for t_curr, t_next in tqdm(t_pairs, desc=desc_map.get(mode, "UniEdit RF-Solver denoise"), disable=not verbose):
+            logical_t = t_curr
             sample = self.sample_once(
                     model=model,
                     sample=sample,
                     t_curr=t_curr,
                     t_next=t_next,
+                    logical_t=logical_t,
                     source_cond=source_cond,
                     target_cond=target_cond,
                     neg_cond=neg_cond,

@@ -96,7 +96,8 @@ class RFSolverSampler:
         self,
         model,
         sample,
-        t_value: float,
+        actual_t: float,
+        logical_t: float,
         cond_dict: dict,
         cfg_strength: float,
         cfg_interval: Tuple[float, float],
@@ -104,14 +105,14 @@ class RFSolverSampler:
         """Compute CFG-guided prediction with aggressive memory cleanup."""
         import gc
 
-        if cfg_interval[0] <= t_value <= cfg_interval[1] and cfg_strength > 0.0:
+        if cfg_interval[0] <= logical_t <= cfg_interval[1] and cfg_strength > 0.0:
             # Run positive prediction
-            pred = self._run_model(model, sample, t_value, cond_dict["cond"])
+            pred = self._run_model(model, sample, actual_t, cond_dict["cond"])
 
             # Sparse flow predictions are not safe to shuttle through CPU between
             # CFG branches. Keep them on-device and combine them directly.
             if self._is_sparse_like(pred):
-                neg_pred = self._run_model(model, sample, t_value, cond_dict["neg_cond"])
+                neg_pred = self._run_model(model, sample, actual_t, cond_dict["neg_cond"])
                 result = (1.0 + cfg_strength) * pred - cfg_strength * neg_pred
                 del pred, neg_pred
                 gc.collect()
@@ -126,7 +127,7 @@ class RFSolverSampler:
                 torch.cuda.empty_cache()
 
             # Run negative prediction
-            neg_pred = self._run_model(model, sample, t_value, cond_dict["neg_cond"])
+            neg_pred = self._run_model(model, sample, actual_t, cond_dict["neg_cond"])
 
             # Move back to GPU for computation
             pred = pred_cpu.to(sample.device)
@@ -143,7 +144,7 @@ class RFSolverSampler:
 
             return result
 
-        return self._run_model(model, sample, t_value, cond_dict["cond"])
+        return self._run_model(model, sample, actual_t, cond_dict["cond"])
 
     @torch.no_grad()
     def sample_once(
@@ -152,6 +153,7 @@ class RFSolverSampler:
         sample,
         t_curr: float,
         t_next: float,
+        logical_t: float,
         cond_dict: dict,
         cfg_strength: float,
         cfg_interval: Tuple[float, float],
@@ -166,24 +168,31 @@ class RFSolverSampler:
         import gc
 
         # First prediction at current point
-        pred = self._guided_prediction(model, sample, t_curr, cond_dict, cfg_strength, cfg_interval)
+        pred = self._guided_prediction(
+            model,
+            sample,
+            actual_t=t_curr,
+            logical_t=logical_t,
+            cond_dict=cond_dict,
+            cfg_strength=cfg_strength,
+            cfg_interval=cfg_interval,
+        )
         dt = t_next - t_curr
 
         # Compute midpoint sample
         sample_mid = sample + 0.5 * dt * pred
         t_mid = t_curr + 0.5 * dt
 
-        # Clean up before midpoint prediction
-        del pred
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
         # Midpoint prediction
-        pred_mid = self._guided_prediction(model, sample_mid, t_mid, cond_dict, cfg_strength, cfg_interval)
-
-        # Recompute first prediction (needed for second-order correction)
-        pred = self._guided_prediction(model, sample, t_curr, cond_dict, cfg_strength, cfg_interval)
+        pred_mid = self._guided_prediction(
+            model,
+            sample_mid,
+            actual_t=t_mid,
+            logical_t=logical_t,
+            cond_dict=cond_dict,
+            cfg_strength=cfg_strength,
+            cfg_interval=cfg_interval,
+        )
 
         # With first_order := (pred_mid - pred) / (dt / 2), the Taylor
         # correction enters with a plus sign.
@@ -245,5 +254,15 @@ class RFSolverSampler:
             )
             desc = "RF-Solver denoise"
         for t_curr, t_next in tqdm(t_pairs, desc=desc, disable=not verbose):
-            sample = self.sample_once(model, sample, t_curr, t_next, cond_dict, cfg_strength, cfg_interval)
+            logical_t = t_next if inverse else t_curr
+            sample = self.sample_once(
+                model,
+                sample,
+                t_curr,
+                t_next,
+                logical_t,
+                cond_dict,
+                cfg_strength,
+                cfg_interval,
+            )
         return sample

@@ -52,6 +52,7 @@ from .config import (
     SamplerOverrideConfig,
     SLATStageConfig,
     SSStageConfig,
+    resolve_inheritable_solver_mode,
 )
 
 
@@ -1206,6 +1207,7 @@ class _ControlledDenoisePluginBase(_ControlledDenoiseHookSupportMixin):
         kv_blend_enabled: bool,
         inversion_enabled: bool,
         inversion_mode: str,
+        denoise_solver_mode: str,
         soft_mask_enabled: bool,
         soft_mask_dilation: int,
         soft_mask_sigma: float,
@@ -1315,7 +1317,7 @@ class _ControlledDenoisePluginBase(_ControlledDenoiseHookSupportMixin):
                     soft_mask_dilation=soft_mask_dilation,
                     soft_mask_sigma=soft_mask_sigma,
                 )
-                if not (kv_blend_enabled or self._is_rf_family_solver(inversion_mode)):
+                if not (kv_blend_enabled or self._is_rf_family_solver(denoise_solver_mode)):
                     slat_sampler = LatentBlendFlowEulerGuidanceIntervalSampler(
                         sigma_min=original_slat_sampler.sigma_min
                     )
@@ -1336,7 +1338,7 @@ class _ControlledDenoisePluginBase(_ControlledDenoiseHookSupportMixin):
             )
             use_custom_slat_loop = bool(
                 kv_blend_enabled
-                or self._is_rf_family_solver(inversion_mode)
+                or self._is_rf_family_solver(denoise_solver_mode)
                 or slat_denoise_start_step < slat_total_steps
             )
             if denoise_init == "terminal_noise":
@@ -1355,7 +1357,7 @@ class _ControlledDenoisePluginBase(_ControlledDenoiseHookSupportMixin):
                         ),
                         source_cond_dict=source_cond_dict,
                         latent_mask=slat_blend_mask,
-                        solver_mode=inversion_mode,
+                        solver_mode=denoise_solver_mode,
                         verbose=True,
                         hook=hook,
                     )
@@ -1379,7 +1381,7 @@ class _ControlledDenoisePluginBase(_ControlledDenoiseHookSupportMixin):
                         source_trace=source_slat_trace if kv_blend_enabled else None,
                         source_cond_dict=source_cond_dict,
                         latent_mask=None,
-                        solver_mode=inversion_mode,
+                        solver_mode=denoise_solver_mode,
                         verbose=True,
                         hook=hook,
                     )
@@ -1515,6 +1517,15 @@ class ControlledDenoiseSSAdapter(_ControlledDenoisePluginBase, SSStagePlugin):
         edit_cond_dict = pipeline.get_cond([edit_image])
         source_cond_dict = None
         ss_edit_region_mode = _resolve_ss_edit_region_mode(config)
+        ss_inversion_solver = config.inversion.solver
+        ss_refinement_solver = resolve_inheritable_solver_mode(
+            config.inversion.refinement_solver,
+            inherit_from=ss_inversion_solver,
+        )
+        ss_denoise_solver = resolve_inheritable_solver_mode(
+            config.denoise.solver,
+            inherit_from=ss_inversion_solver,
+        )
         if config.inversion.enabled or config.controls.p2p.enabled or config.controls.kv_blend.enabled:
             source_cond_dict = pipeline.get_cond([source_image])
 
@@ -1527,7 +1538,10 @@ class ControlledDenoiseSSAdapter(_ControlledDenoisePluginBase, SSStagePlugin):
             "ss_kv_t_end": config.controls.kv_blend.t_end,
             "ss_kv_self_attention": config.controls.kv_blend.self_attention,
             "ss_kv_cross_attention": config.controls.kv_blend.cross_attention,
-            "ss_predictor_corrector_steps": int(config.inversion.predictor_corrector_steps),
+            "ss_kv_source_bundle_mode": config.controls.kv_blend.source_bundle_mode,
+            "ss_refinement_steps": int(config.inversion.refinement_steps),
+            "ss_refinement_solver_mode": ss_refinement_solver,
+            "ss_denoise_solver_mode": ss_denoise_solver,
             "ss_inversion_steps": config.inversion.inversion_steps,
             "ss_denoise_cfg_strength": config.inversion.denoise_cfg_strength,
             "ss_denoise_cfg_interval_start": config.inversion.denoise_cfg_interval[0],
@@ -1613,12 +1627,16 @@ class ControlledDenoiseSSAdapter(_ControlledDenoisePluginBase, SSStagePlugin):
         source_trace = None
         terminal_noise = None
         if config.inversion.enabled:
-            print(f"Step 1: Inverting source SS (mode={config.inversion.solver})...")
+            print(
+                "Step 1: Inverting source SS "
+                f"(predictor={ss_inversion_solver}, refinement={ss_refinement_solver}, "
+                f"refinement_steps={int(config.inversion.refinement_steps)})..."
+            )
             source_trace, terminal_noise = self._prepare_ss_source(
                 pipeline,
                 source_coords,
                 source_cond_dict,
-                config.inversion.solver,
+                ss_inversion_solver,
                 stage_config,
                 resolution,
                 return_terminal_noise=True,
@@ -1662,7 +1680,7 @@ class ControlledDenoiseSSAdapter(_ControlledDenoisePluginBase, SSStagePlugin):
             source_cond_dict=source_cond_dict,
             latent_mask=latent_mask,
             blend_strength=config.controls.latent_blend.strength,
-            solver_mode=config.inversion.solver,
+            solver_mode=ss_denoise_solver,
             verbose=True,
             hook=self.hook,
         )
@@ -1709,19 +1727,21 @@ class ControlledDenoiseSSAdapter(_ControlledDenoisePluginBase, SSStagePlugin):
                     "uniedit_enabled": False,
                 },
                 "inversion_enabled": config.inversion.enabled,
-                "inversion_mode": config.inversion.solver,
+                "inversion_mode": ss_inversion_solver,
                 "ss_total_steps": int(effective_sampler_params.get("steps", 25)),
                 "ss_inversion_steps": effective_ss_inversion_steps,
-                "ss_predictor_corrector_steps": int(config.inversion.predictor_corrector_steps),
+                "ss_refinement_steps": int(config.inversion.refinement_steps),
+                "ss_refinement_solver_mode": ss_refinement_solver,
                 "blend_enabled": config.controls.latent_blend.enabled,
                 "blend_strength": config.controls.latent_blend.strength,
                 "ss_hard_mask_mode": config.controls.latent_blend.hard_mask_mode,
                 "ss_edit_region_mode": ss_edit_region_mode,
                 "ss_denoise_init": config.inversion.denoise_init,
-                "ss_denoise_solver_mode": config.inversion.solver,
+                "ss_denoise_solver_mode": ss_denoise_solver,
                 "ss_kv_blend_enabled": config.controls.kv_blend.enabled,
                 "ss_kv_self_attention": config.controls.kv_blend.self_attention,
                 "ss_kv_cross_attention": config.controls.kv_blend.cross_attention,
+                "ss_kv_source_bundle_mode": config.controls.kv_blend.source_bundle_mode,
                 "ss_kv_soft_mask_enabled": config.controls.kv_blend.soft_mask.enabled,
                 "ss_kv_soft_mask_dilation": int(config.controls.kv_blend.soft_mask.dilation),
                 "ss_kv_soft_mask_sigma": float(config.controls.kv_blend.soft_mask.sigma),
@@ -2199,6 +2219,15 @@ class ControlledDenoiseSLATAdapter(_ControlledDenoisePluginBase, SLATStagePlugin
         source_image, edit_image, mask_image = _prepared_images(preprocess)
         edit_cond_dict = pipeline.get_cond([edit_image])
         source_cond_dict = None
+        slat_inversion_solver = config.inversion.solver
+        slat_refinement_solver = resolve_inheritable_solver_mode(
+            config.inversion.refinement_solver,
+            inherit_from=slat_inversion_solver,
+        )
+        slat_denoise_solver = resolve_inheritable_solver_mode(
+            config.denoise.solver,
+            inherit_from=slat_inversion_solver,
+        )
         if config.inversion.enabled or config.controls.p2p.enabled or config.controls.kv_blend.enabled:
             source_cond_dict = pipeline.get_cond([source_image])
 
@@ -2250,7 +2279,10 @@ class ControlledDenoiseSLATAdapter(_ControlledDenoisePluginBase, SLATStagePlugin
             "slat_kv_t_end": config.controls.kv_blend.t_end,
             "slat_kv_self_attention": config.controls.kv_blend.self_attention,
             "slat_kv_cross_attention": config.controls.kv_blend.cross_attention,
-            "slat_predictor_corrector_steps": int(config.inversion.predictor_corrector_steps),
+            "slat_kv_source_bundle_mode": config.controls.kv_blend.source_bundle_mode,
+            "slat_refinement_steps": int(config.inversion.refinement_steps),
+            "slat_refinement_solver_mode": slat_refinement_solver,
+            "slat_denoise_solver_mode": slat_denoise_solver,
             "slat_inversion_steps": config.inversion.inversion_steps,
             "slat_denoise_init": config.inversion.denoise_init,
             "slat_inversion_scope": config.inversion.scope,
@@ -2365,7 +2397,8 @@ class ControlledDenoiseSLATAdapter(_ControlledDenoisePluginBase, SLATStagePlugin
                 nano3d_replace_enabled=restore_source_outside_mask_enabled,
                 kv_blend_enabled=config.controls.kv_blend.enabled,
                 inversion_enabled=config.inversion.enabled,
-                inversion_mode=config.inversion.solver,
+                inversion_mode=slat_inversion_solver,
+                denoise_solver_mode=slat_denoise_solver,
                 soft_mask_enabled=config.controls.latent_blend.soft_mask.enabled,
                 soft_mask_dilation=config.controls.latent_blend.soft_mask.dilation,
                 soft_mask_sigma=config.controls.latent_blend.soft_mask.sigma,
@@ -2399,6 +2432,7 @@ class ControlledDenoiseSLATAdapter(_ControlledDenoisePluginBase, SLATStagePlugin
                 "slat_kv_blend_enabled": config.controls.kv_blend.enabled,
                 "slat_kv_self_attention": config.controls.kv_blend.self_attention,
                 "slat_kv_cross_attention": config.controls.kv_blend.cross_attention,
+                "slat_kv_source_bundle_mode": config.controls.kv_blend.source_bundle_mode,
                 "slat_kv_soft_mask_enabled": config.controls.kv_blend.soft_mask.enabled,
                 "slat_kv_soft_mask_dilation": int(config.controls.kv_blend.soft_mask.dilation),
                 "slat_kv_soft_mask_sigma": float(config.controls.kv_blend.soft_mask.sigma),
@@ -2409,7 +2443,10 @@ class ControlledDenoiseSLATAdapter(_ControlledDenoisePluginBase, SLATStagePlugin
                 "slat_nano3d_replace_enabled": restore_source_outside_mask_enabled,
                 "slat_total_steps": int(effective_slat_sampler_params.get("steps", 25)),
                 "slat_inversion_steps": effective_slat_inversion_steps,
-                "slat_predictor_corrector_steps": int(config.inversion.predictor_corrector_steps),
+                "slat_inversion_mode": slat_inversion_solver,
+                "slat_refinement_steps": int(config.inversion.refinement_steps),
+                "slat_refinement_solver_mode": slat_refinement_solver,
+                "slat_denoise_solver_mode": slat_denoise_solver,
                 "slat_denoise_init": config.inversion.denoise_init,
                 "slat_inversion_scope": config.inversion.scope,
                 "slat_denoise_cfg_strength": config.inversion.denoise_cfg_strength,

@@ -43,7 +43,10 @@ PRESETS: dict[str, PresetDefinition] = {
         preprocess=PreprocessConfig(
             crop_policy="union_crop",
             mask_policy="provided",
-            adaptive_foreground_scale=AdaptiveForegroundScaleConfig(enabled=True),
+            adaptive_foreground_scale=AdaptiveForegroundScaleConfig(
+                enabled=False,
+                fallback_scale=1.2,
+            ),
         ),
     ),
 }

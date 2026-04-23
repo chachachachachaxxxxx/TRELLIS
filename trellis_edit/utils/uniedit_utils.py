@@ -139,6 +139,19 @@ def build_stage2_selector(coords_target: torch.Tensor, coords_source: torch.Tens
     return overlap_mask.float().reshape(-1, 1)
 
 
+def compute_preserve_coords_from_mask(
+    coords_source: torch.Tensor,
+    mask_coords: torch.Tensor,
+) -> torch.Tensor:
+    """Return source voxels outside the edit mask."""
+    source_coords3 = _coords3d(coords_source)
+    mask_coords3 = _coords3d(mask_coords)
+    resolution = _infer_sparse_resolution(source_coords3, mask_coords3)
+    src_codes = coords_to_flat_indices(source_coords3, resolution=resolution)
+    mask_codes = coords_to_flat_indices(mask_coords3, resolution=resolution)
+    return source_coords3[~torch.isin(src_codes, mask_codes)]
+
+
 def compose_stage1_coords(
     coords_source: torch.Tensor,
     coords_stage1_raw: torch.Tensor,
@@ -178,7 +191,7 @@ def compose_stage1_coords(
     raw_inside_mask = coords_stage1_raw[torch.isin(raw_codes, mask_codes)]
 
     # Source coords outside mask
-    src_outside_mask = _coords3d(coords_source)[~torch.isin(src_codes, mask_codes)]
+    src_outside_mask = compute_preserve_coords_from_mask(coords_source, mask_coords)
 
     # Union: Stage 1 inside mask + source outside mask
     coords_preserve = src_outside_mask
@@ -211,6 +224,50 @@ def compose_stage1_coords(
         "preserve_voxel_count": int(coords_preserve.shape[0]),
     }
 
+    return coords_masked_batched, coords_preserve, stage1_meta
+
+
+def compose_stage1_coords_restore_all_outside_mask(
+    coords_source: torch.Tensor,
+    coords_stage1_raw: torch.Tensor,
+    mask_coords: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, Dict]:
+    """Compose Stage 1 coords by restoring all outside-mask voxels.
+
+    Keep the full raw Stage 1 prediction, then union it with source voxels outside
+    the edit mask. This preserves all outside-mask voxels from both source and raw.
+    """
+    coords_stage1_raw = _coords3d(coords_stage1_raw)
+    source_coords3 = _coords3d(coords_source)
+    mask_coords3 = _coords3d(mask_coords)
+    resolution = _infer_sparse_resolution(source_coords3, coords_stage1_raw, mask_coords3)
+
+    raw_codes = coords_to_flat_indices(coords_stage1_raw, resolution=resolution)
+    src_codes = coords_to_flat_indices(source_coords3, resolution=resolution)
+    mask_codes = coords_to_flat_indices(mask_coords3, resolution=resolution)
+
+    coords_preserve = compute_preserve_coords_from_mask(source_coords3, mask_coords3)
+    coords_union = torch.cat([coords_stage1_raw, coords_preserve], dim=0)
+    coords_masked = torch.unique(coords_union, dim=0)
+    coords_masked_batched = coords3d_to_batched(coords_masked, batch_idx=0)
+
+    masked_codes = coords_to_flat_indices(coords_masked, resolution=resolution)
+    stage1_meta = {
+        "mask_enabled": True,
+        "mask_voxel_count": int(mask_coords3.shape[0]),
+        "stage1_compose_mode": "restore_all_outside_mask",
+        "stage1_raw_voxel_count": int(coords_stage1_raw.shape[0]),
+        "stage1_masked_voxel_count": int(coords_masked.shape[0]),
+        "stage1_raw_overlap_with_source": int(torch.isin(raw_codes, src_codes).sum().item()),
+        "stage1_masked_overlap_with_source": int(torch.isin(masked_codes, src_codes).sum().item()),
+        "stage1_raw_added_count": int((~torch.isin(raw_codes, src_codes)).sum().item()),
+        "stage1_raw_removed_count": int((~torch.isin(src_codes, raw_codes)).sum().item()),
+        "stage1_masked_added_count": int((~torch.isin(masked_codes, src_codes)).sum().item()),
+        "stage1_masked_removed_count": int((~torch.isin(src_codes, masked_codes)).sum().item()),
+        "stage1_raw_voxels_in_mask": int(torch.isin(raw_codes, mask_codes).sum().item()),
+        "stage1_masked_voxels_in_mask": int(torch.isin(masked_codes, mask_codes).sum().item()),
+        "preserve_voxel_count": int(coords_preserve.shape[0]),
+    }
     return coords_masked_batched, coords_preserve, stage1_meta
 
 

@@ -21,8 +21,10 @@ from trellis_edit.inversion.rf_sampler import (
 from trellis_edit.composable.runtime import (
     PredictorStepResult,
     RefinementResult,
+    SolverStepResult,
     SourceTrace,
     StepContext,
+    TraceEvalState,
 )
 from trellis_edit.samplers import SparseLatentBlendMask, blend_sparse_features
 from trellis_edit.utils import build_image_token_metadata, resolve_patch_size
@@ -45,6 +47,7 @@ class ControlledDenoiseCommonMixin:
     }
     _SUPPORTED_SOLVER_MODES = {"simple", "rf_solver", "voxhammer_rf_solver"}
     _RF_FAMILY_SOLVER_MODES = {"rf_solver", "voxhammer_rf_solver"}
+    _SUPPORTED_KV_SOURCE_BUNDLE_MODES = {"solver_aligned", "external_voxhammer"}
 
     @classmethod
     def _validate_stage_list(cls, stages: Iterable[str]) -> list[str]:
@@ -85,6 +88,15 @@ class ControlledDenoiseCommonMixin:
         if solver_mode == "rf_solver":
             return "RF-Solver"
         return "VoxHammer RF-Solver"
+
+    @classmethod
+    def _validate_kv_source_bundle_mode(cls, bundle_mode: str) -> str:
+        if bundle_mode not in cls._SUPPORTED_KV_SOURCE_BUNDLE_MODES:
+            valid = ", ".join(sorted(cls._SUPPORTED_KV_SOURCE_BUNDLE_MODES))
+            raise ValueError(
+                f"Unknown kv source bundle mode: {bundle_mode!r}. Expected one of: {valid}"
+            )
+        return bundle_mode
 
     def _create_p2p_hook(
         self,
@@ -251,17 +263,39 @@ class ControlledDenoiseCommonMixin:
         )
 
     @staticmethod
-    def _resolve_predictor_corrector_steps(
+    def _resolve_refinement_steps(
         stage_prefix: str,
         extra: Dict[str, Any],
     ) -> int:
-        raw_value = extra.get(f"{stage_prefix}_predictor_corrector_steps", 0)
+        raw_value = extra.get(f"{stage_prefix}_refinement_steps", 0)
         steps = int(raw_value)
         if steps < 0:
             raise ValueError(
-                f"{stage_prefix}_predictor_corrector_steps must be >= 0, got {steps}"
+                f"{stage_prefix}_refinement_steps must be >= 0, got {steps}"
             )
         return steps
+
+    @classmethod
+    def _resolve_refinement_solver_mode(
+        cls,
+        stage_prefix: str,
+        extra: Dict[str, Any],
+        *,
+        predictor_solver_mode: str,
+    ) -> str:
+        raw_value = str(extra.get(f"{stage_prefix}_refinement_solver_mode", predictor_solver_mode))
+        if raw_value == "inherit":
+            raw_value = predictor_solver_mode
+        return cls._validate_solver_mode(raw_value)
+
+    @classmethod
+    def _resolve_kv_source_bundle_mode(
+        cls,
+        stage_prefix: str,
+        extra: Dict[str, Any],
+    ) -> str:
+        raw_value = str(extra.get(f"{stage_prefix}_kv_source_bundle_mode", "solver_aligned"))
+        return cls._validate_kv_source_bundle_mode(raw_value)
 
     @staticmethod
     def _gaussian_kernel1d(
@@ -604,16 +638,31 @@ class ControlledDenoiseCommonMixin:
         step_ctx: StepContext,
         predictor_eval_count: int,
         refinement_steps: int,
+        refinement_solver_mode: str,
     ) -> list[SolverEvalSpec]:
+        self._validate_solver_mode(refinement_solver_mode)
+
         eval_specs: list[SolverEvalSpec] = []
-        for offset in range(int(refinement_steps)):
+        next_eval_idx = int(predictor_eval_count) + 1
+        midpoint_t = float(step_ctx.t_curr + 0.5 * (step_ctx.t_next - step_ctx.t_curr))
+        for _ in range(int(refinement_steps)):
             eval_specs.append(
                 SolverEvalSpec(
                     actual_t=float(step_ctx.t_next),
                     logical_t=float(step_ctx.logical_t),
-                    eval_idx=predictor_eval_count + offset + 1,
+                    eval_idx=next_eval_idx,
                 )
             )
+            next_eval_idx += 1
+            if self._is_rf_family_solver(refinement_solver_mode):
+                eval_specs.append(
+                    SolverEvalSpec(
+                        actual_t=midpoint_t,
+                        logical_t=float(step_ctx.logical_t),
+                        eval_idx=next_eval_idx,
+                    )
+                )
+                next_eval_idx += 1
         return eval_specs
 
     def _predict_with_optional_cfg(
@@ -663,6 +712,14 @@ class ControlledDenoiseCommonMixin:
             step_ctx=step_ctx,
             solver_mode=solver_mode,
         )
+        eval_states = [
+            TraceEvalState(
+                actual_t=float(eval_specs[0].actual_t),
+                logical_t=float(eval_specs[0].logical_t),
+                eval_idx=int(eval_specs[0].eval_idx),
+                sample=sample,
+            )
+        ]
         pred_v = self._predict_with_optional_cfg(
             model,
             sample,
@@ -675,9 +732,20 @@ class ControlledDenoiseCommonMixin:
         )
         dt = float(step_ctx.t_next - step_ctx.t_curr)
         if solver_mode == "simple":
-            return PredictorStepResult(x_pred=sample + dt * pred_v)
+            return PredictorStepResult(
+                x_pred=sample + dt * pred_v,
+                eval_states=tuple(eval_states),
+            )
 
         sample_mid = sample + 0.5 * dt * pred_v
+        eval_states.append(
+            TraceEvalState(
+                actual_t=float(eval_specs[1].actual_t),
+                logical_t=float(eval_specs[1].logical_t),
+                eval_idx=int(eval_specs[1].eval_idx),
+                sample=sample_mid,
+            )
+        )
         pred_v_mid = self._predict_with_optional_cfg(
             model,
             sample_mid,
@@ -693,7 +761,10 @@ class ControlledDenoiseCommonMixin:
             x_pred = sample + dt * pred_v + 0.5 * (dt ** 2) * first_order
         else:
             x_pred = sample + dt * pred_v - 0.5 * (dt ** 2) * first_order
-        return PredictorStepResult(x_pred=x_pred)
+        return PredictorStepResult(
+            x_pred=x_pred,
+            eval_states=tuple(eval_states),
+        )
 
     def _refine_step(
         self,
@@ -706,12 +777,14 @@ class ControlledDenoiseCommonMixin:
         cfg_strength: float,
         cfg_interval: Tuple[float, float],
         solver_mode: str,
-        predictor_corrector_steps: int,
+        refinement_steps: int,
+        refinement_solver_mode: str,
         hook: Any | None = None,
     ) -> RefinementResult:
         self._validate_solver_mode(solver_mode)
+        self._validate_solver_mode(refinement_solver_mode)
 
-        if predictor_corrector_steps <= 0:
+        if refinement_steps <= 0:
             return RefinementResult(x_next=predictor_result.x_pred)
 
         eval_specs = self._build_refinement_eval_specs(
@@ -719,16 +792,28 @@ class ControlledDenoiseCommonMixin:
             predictor_eval_count=len(
                 self._build_predictor_eval_specs(step_ctx=step_ctx, solver_mode=solver_mode)
             ),
-            refinement_steps=predictor_corrector_steps,
+            refinement_steps=refinement_steps,
+            refinement_solver_mode=refinement_solver_mode,
         )
 
-        # UniInv-style correction is an inversion-only refinement axis:
-        # start from the predictor result at t_next, then repeatedly
-        # re-evaluate a denoising-like velocity at t_next and update the
-        # same step from the original low-noise state.
+        # Refinement is inversion-only: each round starts from the current
+        # t_next anchor, but always recomputes the step update from the
+        # original low-noise sample x_t. RF-family refinement therefore
+        # materializes both {t_next, midpoint} sidecars per round.
         corrected_sample = predictor_result.x_pred
         dt = float(step_ctx.t_next - step_ctx.t_curr)
-        for eval_spec in eval_specs:
+        refinement_states: list[TraceEvalState] = []
+        eval_iter = iter(eval_specs)
+        for _ in range(int(refinement_steps)):
+            eval_spec = next(eval_iter)
+            refinement_states.append(
+                TraceEvalState(
+                    actual_t=float(eval_spec.actual_t),
+                    logical_t=float(eval_spec.logical_t),
+                    eval_idx=int(eval_spec.eval_idx),
+                    sample=corrected_sample,
+                )
+            )
             corrected_v = self._predict_with_optional_cfg(
                 model,
                 corrected_sample,
@@ -739,8 +824,38 @@ class ControlledDenoiseCommonMixin:
                 hook=hook,
                 phase=step_ctx.phase,
             )
-            corrected_sample = sample + dt * corrected_v
-        return RefinementResult(x_next=corrected_sample)
+            if refinement_solver_mode == "simple":
+                corrected_sample = sample + dt * corrected_v
+                continue
+
+            sample_mid = sample + 0.5 * dt * corrected_v
+            mid_eval_spec = next(eval_iter)
+            refinement_states.append(
+                TraceEvalState(
+                    actual_t=float(mid_eval_spec.actual_t),
+                    logical_t=float(mid_eval_spec.logical_t),
+                    eval_idx=int(mid_eval_spec.eval_idx),
+                    sample=sample_mid,
+                )
+            )
+            corrected_v_mid = self._predict_with_optional_cfg(
+                model,
+                sample_mid,
+                cond_dict,
+                cfg_strength=cfg_strength,
+                cfg_interval=cfg_interval,
+                eval_spec=mid_eval_spec,
+                hook=hook,
+                phase=step_ctx.phase,
+            )
+            if refinement_solver_mode == "rf_solver":
+                corrected_sample = sample + dt * corrected_v_mid
+            else:
+                corrected_sample = sample + dt * (2.0 * corrected_v - corrected_v_mid)
+        return RefinementResult(
+            x_next=corrected_sample,
+            eval_states=tuple(refinement_states),
+        )
 
     def _invert_sample(
         self,
@@ -759,7 +874,12 @@ class ControlledDenoiseCommonMixin:
 
         extra = config.extra_params or {}
         inversion_cfg = self._resolve_inversion_cfg(stage_prefix, extra)
-        predictor_corrector_steps = self._resolve_predictor_corrector_steps(stage_prefix, extra)
+        refinement_steps = self._resolve_refinement_steps(stage_prefix, extra)
+        refinement_solver_mode = self._resolve_refinement_solver_mode(
+            stage_prefix,
+            extra,
+            predictor_solver_mode=inversion_mode,
+        )
         inversion_steps = self._resolve_inversion_steps(stage_prefix, steps, extra)
         t_pairs, _ = build_inversion_t_pairs(
             steps=steps,
@@ -771,7 +891,7 @@ class ControlledDenoiseCommonMixin:
         source_trace.add_entry(
             step_index=-1,
             logical_t=0.0,
-            sample=sample.cpu(),
+            sample=self._trace_sample_to_cpu(sample),
         )
 
         with torch.inference_mode():
@@ -788,7 +908,7 @@ class ControlledDenoiseCommonMixin:
                         t_next=t_next,
                     ),
                 )
-                sample = self._sample_with_solver(
+                step_result = self._sample_with_solver(
                     model,
                     sample,
                     cond_dict,
@@ -796,13 +916,17 @@ class ControlledDenoiseCommonMixin:
                     cfg_strength=inversion_cfg["cfg_strength"],
                     cfg_interval=inversion_cfg["cfg_interval"],
                     solver_mode=inversion_mode,
-                    predictor_corrector_steps=predictor_corrector_steps,
+                    refinement_steps=refinement_steps,
+                    refinement_solver_mode=refinement_solver_mode,
                     hook=hook,
                 )
+                sample = step_result.x_next
                 source_trace.add_entry(
                     step_index=i,
                     logical_t=step_ctx.logical_t,
-                    sample=sample.cpu(),
+                    sample=self._trace_sample_to_cpu(sample),
+                    predictor_states=self._trace_eval_states_to_cpu(step_result.predictor_states),
+                    refinement_states=self._trace_eval_states_to_cpu(step_result.refinement_states),
                 )
 
                 if i % 5 == 0 and torch.cuda.is_available():
@@ -822,10 +946,12 @@ class ControlledDenoiseCommonMixin:
         cfg_strength: float,
         cfg_interval: Tuple[float, float],
         solver_mode: str,
-        predictor_corrector_steps: int,
+        refinement_steps: int,
+        refinement_solver_mode: str,
         hook: Any | None = None,
-    ):
+    ) -> SolverStepResult:
         self._validate_solver_mode(solver_mode)
+        self._validate_solver_mode(refinement_solver_mode)
 
         predictor_result = self._predictor_step(
             model,
@@ -846,10 +972,15 @@ class ControlledDenoiseCommonMixin:
             cfg_strength=cfg_strength,
             cfg_interval=cfg_interval,
             solver_mode=solver_mode,
-            predictor_corrector_steps=predictor_corrector_steps,
+            refinement_steps=refinement_steps,
+            refinement_solver_mode=refinement_solver_mode,
             hook=hook,
         )
-        return refinement_result.x_next
+        return SolverStepResult(
+            x_next=refinement_result.x_next,
+            predictor_states=tuple(predictor_result.eval_states),
+            refinement_states=tuple(refinement_result.eval_states),
+        )
 
     def _prepare_ss_latent_from_coords(
         self,
@@ -1011,6 +1142,33 @@ class ControlledDenoiseCommonMixin:
             return sample.to(device=device, dtype=dtype)
         raise TypeError(f"Unsupported source trace sample type: {type(sample)!r}")
 
+    @staticmethod
+    def _trace_sample_to_cpu(sample: Any) -> Any:
+        if torch.is_tensor(sample):
+            return sample.detach().cpu()
+        if hasattr(sample, "detach"):
+            sample = sample.detach()
+        if hasattr(sample, "cpu"):
+            return sample.cpu()
+        if hasattr(sample, "to"):
+            return sample.to(device="cpu")
+        raise TypeError(f"Unsupported source trace sample type: {type(sample)!r}")
+
+    @classmethod
+    def _trace_eval_states_to_cpu(
+        cls,
+        eval_states: tuple[TraceEvalState, ...] | list[TraceEvalState],
+    ) -> tuple[TraceEvalState, ...]:
+        return tuple(
+            TraceEvalState(
+                actual_t=float(state.actual_t),
+                logical_t=float(state.logical_t),
+                eval_idx=int(state.eval_idx),
+                sample=cls._trace_sample_to_cpu(state.sample),
+            )
+            for state in eval_states
+        )
+
     def _prepare_step_source_snapshots(
         self,
         *,
@@ -1023,6 +1181,7 @@ class ControlledDenoiseCommonMixin:
         cfg_strength: float,
         cfg_interval: Tuple[float, float],
         solver_mode: str,
+        source_bundle_mode: str,
     ) -> None:
         if hook is None or not hasattr(hook, "requires_step_source_snapshot"):
             return
@@ -1036,29 +1195,62 @@ class ControlledDenoiseCommonMixin:
             return
 
         device = source_cond_dict["cond"].device
-        source_sample = self._trace_sample_to_device(source_entry.sample, device=device)
         predictor_eval_specs = self._build_predictor_eval_specs(
             step_ctx=step_ctx,
             solver_mode=solver_mode,
         )
+        bundle_mode = self._validate_kv_source_bundle_mode(source_bundle_mode)
         hook.clear_step_source_snapshot(stage_name=stage_name)
         hook.begin_step_source_capture(stage_name=stage_name, logical_t=step_ctx.logical_t)
         try:
-            replay_sample = source_sample
-            dt = float(step_ctx.t_next - step_ctx.t_curr)
-            for eval_idx, eval_spec in enumerate(predictor_eval_specs):
-                pred_v = self._predict_with_optional_cfg(
-                    model,
-                    replay_sample,
-                    source_cond_dict,
-                    cfg_strength=cfg_strength,
-                    cfg_interval=cfg_interval,
-                    eval_spec=eval_spec,
-                    hook=hook,
-                    phase="source_capture",
-                )
-                if eval_idx == 0 and len(predictor_eval_specs) > 1:
-                    replay_sample = source_sample + 0.5 * dt * pred_v
+            if bundle_mode == "external_voxhammer":
+                predictor_states = tuple(source_entry.predictor_states)
+                if len(predictor_states) != len(predictor_eval_specs):
+                    raise RuntimeError(
+                        f"{stage_name} source entry logical_t={step_ctx.logical_t:.10f} has "
+                        f"{len(predictor_states)} predictor states, expected {len(predictor_eval_specs)} "
+                        f"for bundle mode '{bundle_mode}' and solver '{solver_mode}'."
+                    )
+                for expected_eval_spec, source_state in zip(predictor_eval_specs, predictor_states):
+                    if int(source_state.eval_idx) != int(expected_eval_spec.eval_idx):
+                        raise RuntimeError(
+                            f"{stage_name} source predictor eval_idx mismatch at logical_t="
+                            f"{step_ctx.logical_t:.10f}: got {source_state.eval_idx}, "
+                            f"expected {expected_eval_spec.eval_idx}."
+                        )
+                    replay_sample = self._trace_sample_to_device(source_state.sample, device=device)
+                    eval_spec = SolverEvalSpec(
+                        actual_t=float(source_state.actual_t),
+                        logical_t=float(step_ctx.logical_t),
+                        eval_idx=int(expected_eval_spec.eval_idx),
+                    )
+                    self._predict_with_optional_cfg(
+                        model,
+                        replay_sample,
+                        source_cond_dict,
+                        cfg_strength=cfg_strength,
+                        cfg_interval=cfg_interval,
+                        eval_spec=eval_spec,
+                        hook=hook,
+                        phase="source_capture",
+                    )
+            else:
+                source_sample = self._trace_sample_to_device(source_entry.sample, device=device)
+                replay_sample = source_sample
+                dt = float(step_ctx.t_next - step_ctx.t_curr)
+                for eval_idx, eval_spec in enumerate(predictor_eval_specs):
+                    pred_v = self._predict_with_optional_cfg(
+                        model,
+                        replay_sample,
+                        source_cond_dict,
+                        cfg_strength=cfg_strength,
+                        cfg_interval=cfg_interval,
+                        eval_spec=eval_spec,
+                        hook=hook,
+                        phase="source_capture",
+                    )
+                    if eval_idx == 0 and len(predictor_eval_specs) > 1:
+                        replay_sample = source_sample + 0.5 * dt * pred_v
             snapshot = hook.end_step_source_capture(stage_name=stage_name, logical_t=step_ctx.logical_t)
         except Exception:
             hook.cancel_step_source_capture(stage_name=stage_name)
@@ -1100,6 +1292,7 @@ class ControlledDenoiseCommonMixin:
         cfg_strength = float(sampler_params.get("cfg_strength", 0.0))
         cfg_interval = tuple(sampler_params.get("cfg_interval", (0.0, 1.0)))
         blend_strength = float(blend_strength)
+        source_bundle_mode = self._resolve_kv_source_bundle_mode("ss", extra)
         denoise_start_step = (
             self._resolve_inversion_steps("ss", steps, extra)
             if initial_sample is not None
@@ -1171,6 +1364,7 @@ class ControlledDenoiseCommonMixin:
                     cfg_strength=cfg_strength,
                     cfg_interval=cfg_interval,
                     solver_mode=solver_mode,
+                    source_bundle_mode=source_bundle_mode,
                 )
                 try:
                     sample = self._sample_with_solver(
@@ -1181,9 +1375,10 @@ class ControlledDenoiseCommonMixin:
                         cfg_strength=cfg_strength,
                         cfg_interval=cfg_interval,
                         solver_mode=solver_mode,
-                        predictor_corrector_steps=0,
+                        refinement_steps=0,
+                        refinement_solver_mode=solver_mode,
                         hook=hook,
-                    )
+                    ).x_next
                 finally:
                     if hook is not None and hasattr(hook, "clear_step_source_snapshot"):
                         hook.clear_step_source_snapshot(stage_name="ss")
@@ -1225,6 +1420,7 @@ class ControlledDenoiseCommonMixin:
         rescale_t = sampler_params.get("rescale_t", 3.0)
         cfg_strength = float(sampler_params.get("cfg_strength", 0.0))
         cfg_interval = tuple(sampler_params.get("cfg_interval", (0.0, 1.0)))
+        source_bundle_mode = self._resolve_kv_source_bundle_mode("slat", extra)
         denoise_start_step = (
             self._resolve_inversion_steps("slat", steps, extra)
             if initial_sample is not None
@@ -1283,6 +1479,7 @@ class ControlledDenoiseCommonMixin:
                     cfg_strength=cfg_strength,
                     cfg_interval=cfg_interval,
                     solver_mode=solver_mode,
+                    source_bundle_mode=source_bundle_mode,
                 )
                 try:
                     sample = self._sample_with_solver(
@@ -1293,9 +1490,10 @@ class ControlledDenoiseCommonMixin:
                         cfg_strength=cfg_strength,
                         cfg_interval=cfg_interval,
                         solver_mode=solver_mode,
-                        predictor_corrector_steps=0,
+                        refinement_steps=0,
+                        refinement_solver_mode=solver_mode,
                         hook=hook,
-                    )
+                    ).x_next
                 finally:
                     if hook is not None and hasattr(hook, "clear_step_source_snapshot"):
                         hook.clear_step_source_snapshot(stage_name="slat")

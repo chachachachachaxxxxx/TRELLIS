@@ -23,7 +23,7 @@ from trellis_edit.preprocess.foreground_scale_selection import (
     compute_active_bbox,
     compute_sparse_structure_metrics,
     normalize_sparse_coords,
-    select_crop_scale_from_linear_fit,
+    select_crop_scale_from_linearized_size_fit,
     select_crop_scale_from_probes,
 )
 from trellis_edit.preprocess.mask_utils import build_auto_mask, build_blank_mask, binarize_mask_image, extract_mask_channel
@@ -42,6 +42,7 @@ class _PreparedForeground:
 
 class SharedImagePreprocessPlugin(PreprocessPlugin):
     name = "shared_image"
+    _ALPHA_THRESHOLD = int(0.8 * 255)
 
     @staticmethod
     def _ensure_rembg_session(pipeline):
@@ -200,13 +201,28 @@ class SharedImagePreprocessPlugin(PreprocessPlugin):
         release_cuda_memory()
         return metrics
 
+    @classmethod
+    def _compute_proc_bbox_linear_ratio(cls, image: Image.Image) -> float:
+        rgba = np.asarray(image.convert("RGBA"))
+        mask = rgba[:, :, 3] > cls._ALPHA_THRESHOLD
+        if not np.any(mask):
+            return 0.0
+        bbox = compute_active_bbox(mask)
+        return float(np.sqrt(float(bbox.area)) / float(PROC_IMAGE_SIZE))
+
     @staticmethod
     def _select_global_linear_crop_scale(
         adaptive: AdaptiveForegroundScaleConfig,
         target_bbox_volume_ratio: float,
+        source_fg: _PreparedForeground,
+        active: np.ndarray,
     ) -> tuple[float, dict]:
-        selected_scale, selection_meta = select_crop_scale_from_linear_fit(
+        source_bbox = compute_active_bbox(source_fg.mask)
+        active_bbox = compute_active_bbox(active)
+        selected_scale, selection_meta = select_crop_scale_from_linearized_size_fit(
             target_bbox_volume_ratio=target_bbox_volume_ratio,
+            source_bbox=source_bbox,
+            active_bbox=active_bbox,
             slope=adaptive.linear_bbox_slope,
             intercept=adaptive.linear_bbox_intercept,
             fallback_scale=adaptive.fallback_scale,
@@ -217,6 +233,10 @@ class SharedImagePreprocessPlugin(PreprocessPlugin):
             **selection_meta,
             "linear_fit_source_run": (
                 "exp/foreground_crop_sweep_ss_size/results/full_300x5_seed1_default"
+            ),
+            "linear_fit_mode": "proc_fg_bbox_linear_to_bbox_volume_linear",
+            "linear_fit_relation": (
+                "cbrt(ss_bbox_volume_ratio) ~= intercept + slope * sqrt(proc_fg_bbox_area_ratio)"
             ),
             "linear_fit_filter_rule": (
                 "exclude cases with case-wise Spearman(crop_scale,bbox_volume_ratio) >= 0 "
@@ -287,6 +307,8 @@ class SharedImagePreprocessPlugin(PreprocessPlugin):
             selected_scale, selection_meta = self._select_global_linear_crop_scale(
                 adaptive,
                 target_bbox_volume_ratio,
+                source_fg,
+                active,
             )
             return selected_scale, {
                 "enabled": True,
@@ -306,9 +328,11 @@ class SharedImagePreprocessPlugin(PreprocessPlugin):
         probe_results: list[dict] = []
         for probe_scale in sorted(float(value) for value in adaptive.probe_scales):
             crop_context = self._build_crop_context_from_scale(active, downscale, probe_scale)
-            probe_image = self._render_output_image(
-                source_fg.image.crop(crop_context.bbox).resize((PROC_IMAGE_SIZE, PROC_IMAGE_SIZE), Image.Resampling.LANCZOS)
+            probe_rgba = source_fg.image.crop(crop_context.bbox).resize(
+                (PROC_IMAGE_SIZE, PROC_IMAGE_SIZE),
+                Image.Resampling.LANCZOS,
             )
+            probe_image = self._render_output_image(probe_rgba)
             probe_metrics = self._sample_probe_bbox_volume_ratio(
                 context=context,
                 image=probe_image,
@@ -320,6 +344,7 @@ class SharedImagePreprocessPlugin(PreprocessPlugin):
                 {
                     "crop_scale": float(probe_scale),
                     "crop_bbox_xyxy": [int(value) for value in crop_context.bbox],
+                    "proc_fg_bbox_linear_ratio": self._compute_proc_bbox_linear_ratio(probe_rgba),
                     **probe_metrics,
                 }
             )
@@ -336,6 +361,10 @@ class SharedImagePreprocessPlugin(PreprocessPlugin):
             "enabled": True,
             "strategy": adaptive.strategy,
             "probe_image": "source",
+            "probe_fit_mode": "proc_fg_bbox_linear_to_bbox_volume_linear",
+            "probe_fit_relation": (
+                "cbrt(ss_bbox_volume_ratio) interpolated against sqrt(proc_fg_bbox_area_ratio)"
+            ),
             "resolution": resolution,
             "source_voxels_path": str(source_voxels_path),
             "source_metrics": source_metrics,

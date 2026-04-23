@@ -19,13 +19,30 @@ class StepContext:
 
 
 @dataclass(frozen=True)
+class TraceEvalState:
+    actual_t: float
+    logical_t: float
+    eval_idx: int
+    sample: Any
+
+
+@dataclass(frozen=True)
 class PredictorStepResult:
     x_pred: Any
+    eval_states: tuple[TraceEvalState, ...] = ()
 
 
 @dataclass(frozen=True)
 class RefinementResult:
     x_next: Any
+    eval_states: tuple[TraceEvalState, ...] = ()
+
+
+@dataclass(frozen=True)
+class SolverStepResult:
+    x_next: Any
+    predictor_states: tuple[TraceEvalState, ...] = ()
+    refinement_states: tuple[TraceEvalState, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -33,6 +50,8 @@ class SourceTraceEntry:
     step_index: int
     logical_t: float
     sample: Any
+    predictor_states: tuple[TraceEvalState, ...] = ()
+    refinement_states: tuple[TraceEvalState, ...] = ()
 
 
 @dataclass
@@ -44,11 +63,21 @@ class SourceTrace:
         for entry in self.entries:
             self._by_logical_t[_time_key(entry.logical_t)] = entry
 
-    def add_entry(self, *, step_index: int, logical_t: float, sample: Any) -> None:
+    def add_entry(
+        self,
+        *,
+        step_index: int,
+        logical_t: float,
+        sample: Any,
+        predictor_states: tuple[TraceEvalState, ...] = (),
+        refinement_states: tuple[TraceEvalState, ...] = (),
+    ) -> None:
         entry = SourceTraceEntry(
             step_index=step_index,
             logical_t=float(logical_t),
             sample=sample,
+            predictor_states=tuple(predictor_states),
+            refinement_states=tuple(refinement_states),
         )
         self.entries.append(entry)
         self._by_logical_t[_time_key(entry.logical_t)] = entry

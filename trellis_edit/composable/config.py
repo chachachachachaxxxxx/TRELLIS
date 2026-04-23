@@ -10,13 +10,50 @@ CropPolicy = Literal["disabled", "union_crop", "mask_crop"]
 PreprocessStyle = Literal["shared", "voxhammer"]
 MaskPolicy = Literal["provided", "auto_diff", "blank"]
 AdaptiveForegroundScaleStrategy = Literal["two_probe", "global_linear"]
-SolverMode = Literal["simple", "rf_solver"]
+SolverMode = Literal["simple", "rf_solver", "voxhammer_rf_solver"]
+InheritableSolverMode = Literal["inherit", "simple", "rf_solver", "voxhammer_rf_solver"]
 SSDenoiseInit = Literal["random_noise", "inverted_terminal_noise"]
 SLATDenoiseInit = Literal["random_noise", "terminal_noise"]
 SLATInversionScope = Literal["full_source", "preserve_only"]
-SSMethod = Literal["p2p", "uniedit", "flowedit", "anchorflow"]
-SLATMethod = Literal["p2p", "uniedit", "direct_target"]
-StagePostprocessMode = Literal["none", "restore_source_outside_mask", "boundary_band_restore"]
+SSBlendRegionMode = Literal["mask_only", "preserve_complement"]
+KVSourceBundleMode = Literal["solver_aligned", "external_voxhammer"]
+SSMethod = Literal["controlled_denoise", "uniedit", "flowedit", "anchorflow"]
+SLATMethod = Literal["controlled_denoise", "uniedit", "direct_target"]
+StagePostprocessMode = Literal[
+    "none",
+    "restore_source_outside_mask",
+    "restore_all_outside_mask",
+    "boundary_band_restore",
+]
+
+_SOLVER_MODE_VALUES = {"simple", "rf_solver", "voxhammer_rf_solver"}
+_INHERITABLE_SOLVER_MODE_VALUES = {"inherit", *tuple(_SOLVER_MODE_VALUES)}
+
+
+def validate_solver_mode_value(solver_mode: str, *, field_name: str) -> None:
+    if solver_mode not in _SOLVER_MODE_VALUES:
+        valid = ", ".join(sorted(_SOLVER_MODE_VALUES))
+        raise RuntimeError(f"{field_name} must be one of: {valid}. Got {solver_mode!r}.")
+
+
+def validate_inheritable_solver_mode_value(solver_mode: str, *, field_name: str) -> None:
+    if solver_mode not in _INHERITABLE_SOLVER_MODE_VALUES:
+        valid = ", ".join(sorted(_INHERITABLE_SOLVER_MODE_VALUES))
+        raise RuntimeError(f"{field_name} must be one of: {valid}. Got {solver_mode!r}.")
+
+
+def resolve_inheritable_solver_mode(
+    solver_mode: SolverMode | InheritableSolverMode,
+    *,
+    inherit_from: SolverMode,
+) -> SolverMode:
+    if solver_mode == "inherit":
+        return inherit_from
+    return solver_mode
+
+
+def solver_predictor_eval_count(solver_mode: SolverMode) -> int:
+    return 2 if solver_mode in {"rf_solver", "voxhammer_rf_solver"} else 1
 
 
 @dataclass(frozen=True)
@@ -70,8 +107,8 @@ class AdaptiveForegroundScaleConfig:
     max_scale: float = 1.5
     min_bbox_volume_delta: float = 0.02
     fallback_scale: float = 1.2
-    linear_bbox_slope: float = -0.2524674839565567
-    linear_bbox_intercept: float = 0.6333178020685066
+    linear_bbox_slope: float = 0.5449373200077813
+    linear_bbox_intercept: float = 0.29052836699859885
 
 
 @dataclass(frozen=True)
@@ -95,6 +132,7 @@ class KVBlendControlConfig:
     t_end: float = 0.0
     self_attention: bool = True
     cross_attention: bool = True
+    source_bundle_mode: KVSourceBundleMode = "solver_aligned"
     soft_mask: SoftMaskConfig = field(default_factory=SoftMaskConfig)
 
 
@@ -102,6 +140,7 @@ class KVBlendControlConfig:
 class SSKVBlendControlConfig(KVBlendControlConfig):
     t_start: float = 1.0
     t_end: float = 0.0
+    edit_region_mode: SSBlendRegionMode = "mask_only"
 
 
 @dataclass(frozen=True)
@@ -136,6 +175,7 @@ class SSLatentBlendControlConfig:
     enabled: bool = False
     strength: float = 1.0
     hard_mask_mode: Literal["edit_any", "edit_all"] = "edit_all"
+    edit_region_mode: SSBlendRegionMode = "mask_only"
     soft_mask: SoftMaskConfig = field(default_factory=SoftMaskConfig)
 
 
@@ -183,11 +223,22 @@ class SLATControlsConfig:
 
 
 @dataclass(frozen=True)
+class SSDenoiseConfig:
+    solver: InheritableSolverMode = "inherit"
+
+
+@dataclass(frozen=True)
+class SLATDenoiseConfig:
+    solver: InheritableSolverMode = "inherit"
+
+
+@dataclass(frozen=True)
 class SSInversionConfig:
     enabled: bool = True
     denoise_init: SSDenoiseInit = "inverted_terminal_noise"
     solver: SolverMode = "simple"
-    predictor_corrector_steps: int = 0
+    refinement_steps: int = 0
+    refinement_solver: InheritableSolverMode = "inherit"
     inversion_steps: int | None = None
     denoise_cfg_strength: float = 5.0
     denoise_cfg_interval: tuple[float, float] = (0.5, 1.0)
@@ -202,7 +253,8 @@ class SLATInversionConfig:
     denoise_init: SLATDenoiseInit = "terminal_noise"
     scope: SLATInversionScope = "full_source"
     solver: SolverMode = "simple"
-    predictor_corrector_steps: int = 0
+    refinement_steps: int = 0
+    refinement_solver: InheritableSolverMode = "inherit"
     inversion_steps: int | None = None
     denoise_cfg_strength: float | None = None
     denoise_cfg_interval: tuple[float, float] | None = None
@@ -259,7 +311,7 @@ class SSBoundaryBandRestoreConfig:
 
 @dataclass(frozen=True)
 class SSPostprocessConfig:
-    mode: StagePostprocessMode = "restore_source_outside_mask"
+    mode: StagePostprocessMode = "restore_all_outside_mask"
     boundary_band: SSBoundaryBandRestoreConfig = field(default_factory=SSBoundaryBandRestoreConfig)
 
 
@@ -270,9 +322,10 @@ class SLATPostprocessConfig:
 
 @dataclass(frozen=True)
 class SSStageConfig:
-    method: SSMethod = "p2p"
+    method: SSMethod = "controlled_denoise"
     sampler: SamplerOverrideConfig = field(default_factory=SamplerOverrideConfig)
     inversion: SSInversionConfig = field(default_factory=SSInversionConfig)
+    denoise: SSDenoiseConfig = field(default_factory=SSDenoiseConfig)
     flowedit: SSFlowEditConfig = field(default_factory=SSFlowEditConfig)
     anchorflow: SSAnchorFlowConfig = field(default_factory=SSAnchorFlowConfig)
     controls: SSControlsConfig = field(default_factory=SSControlsConfig)
@@ -296,27 +349,65 @@ class SSStageConfig:
             self.inversion.enabled
             or self.controls.latent_blend.enabled
             or self.controls.uniedit.enabled
-            or self.postprocess.mode in {"restore_source_outside_mask", "boundary_band_restore"}
+            or self.postprocess.mode != "none"
         )
 
     def requires_mask_glb(self) -> bool:
         return (
             self.controls.latent_blend.enabled
             or self.controls.kv_blend.enabled
-            or self.postprocess.mode in {"restore_source_outside_mask", "boundary_band_restore"}
+            or self.postprocess.mode != "none"
         )
 
     def validate(self, label: str = "ss") -> None:
         from .validation_rules import validate_ss_stage_config
 
         validate_ss_stage_config(self, label)
+        validate_solver_mode_value(self.inversion.solver, field_name=f"{label}.inversion.solver")
+        validate_inheritable_solver_mode_value(
+            self.inversion.refinement_solver,
+            field_name=f"{label}.inversion.refinement_solver",
+        )
+        validate_inheritable_solver_mode_value(self.denoise.solver, field_name=f"{label}.denoise.solver")
+        enabled_modes = []
+        if self.controls.kv_blend.enabled:
+            enabled_modes.append(
+                ("controls.kv_blend.edit_region_mode", self.controls.kv_blend.edit_region_mode)
+            )
+        if self.controls.latent_blend.enabled:
+            enabled_modes.append(
+                ("controls.latent_blend.edit_region_mode", self.controls.latent_blend.edit_region_mode)
+            )
+        if len({mode for _, mode in enabled_modes}) > 1:
+            details = ", ".join(f"{field}={mode}" for field, mode in enabled_modes)
+            raise RuntimeError(
+                f"{label} enabled blend controls must share the same edit_region_mode. Got: {details}"
+            )
+        resolved_denoise_solver = resolve_inheritable_solver_mode(
+            self.denoise.solver,
+            inherit_from=self.inversion.solver,
+        )
+        if (
+            self.inversion.enabled
+            and self.controls.kv_blend.enabled
+            and self.controls.kv_blend.source_bundle_mode == "external_voxhammer"
+            and solver_predictor_eval_count(self.inversion.solver)
+            != solver_predictor_eval_count(resolved_denoise_solver)
+        ):
+            raise RuntimeError(
+                f"{label}.controls.kv_blend.source_bundle_mode='external_voxhammer' requires "
+                f"{label}.inversion.solver and {label}.denoise.solver to share the same predictor "
+                f"slot layout. Resolved inversion={self.inversion.solver!r}, "
+                f"denoise={resolved_denoise_solver!r}."
+            )
 
 
 @dataclass(frozen=True)
 class SLATStageConfig:
-    method: SLATMethod = "p2p"
+    method: SLATMethod = "controlled_denoise"
     sampler: SamplerOverrideConfig = field(default_factory=SamplerOverrideConfig)
     inversion: SLATInversionConfig = field(default_factory=SLATInversionConfig)
+    denoise: SLATDenoiseConfig = field(default_factory=SLATDenoiseConfig)
     controls: SLATControlsConfig = field(default_factory=SLATControlsConfig)
     postprocess: SLATPostprocessConfig = field(default_factory=SLATPostprocessConfig)
     decode: SLATDecodeConfig = field(default_factory=SLATDecodeConfig)
@@ -359,6 +450,29 @@ class SLATStageConfig:
         from .validation_rules import validate_slat_stage_config
 
         validate_slat_stage_config(self, label)
+        validate_solver_mode_value(self.inversion.solver, field_name=f"{label}.inversion.solver")
+        validate_inheritable_solver_mode_value(
+            self.inversion.refinement_solver,
+            field_name=f"{label}.inversion.refinement_solver",
+        )
+        validate_inheritable_solver_mode_value(self.denoise.solver, field_name=f"{label}.denoise.solver")
+        resolved_denoise_solver = resolve_inheritable_solver_mode(
+            self.denoise.solver,
+            inherit_from=self.inversion.solver,
+        )
+        if (
+            self.inversion.enabled
+            and self.controls.kv_blend.enabled
+            and self.controls.kv_blend.source_bundle_mode == "external_voxhammer"
+            and solver_predictor_eval_count(self.inversion.solver)
+            != solver_predictor_eval_count(resolved_denoise_solver)
+        ):
+            raise RuntimeError(
+                f"{label}.controls.kv_blend.source_bundle_mode='external_voxhammer' requires "
+                f"{label}.inversion.solver and {label}.denoise.solver to share the same predictor "
+                f"slot layout. Resolved inversion={self.inversion.solver!r}, "
+                f"denoise={resolved_denoise_solver!r}."
+            )
 
 
 def default_ss_stage() -> SSStageConfig:
