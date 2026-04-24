@@ -10,7 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from trellis_edit.benchmarking import DEFAULT_BENCHMARK_ROOT, build_focus_index
+from trellis_edit.benchmark_pages import DEFAULT_BENCHMARK_ROOT, build_focus_index
 
 
 def parse_args() -> argparse.Namespace:

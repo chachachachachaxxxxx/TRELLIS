@@ -32,11 +32,11 @@ from run_batch_edit_and_eval import (
     load_edit3d_metadata,
     parse_gpu_list,
     prepare_case_run,
-    render_all_results,
     run_evaluation,
     run_single_edit,
     save_results,
 )
+from trellis_edit.benchmarks import RunResult
 from trellis_edit.common import ensure_dir
 from trellis_edit.composable import has_entrypoint
 
@@ -416,7 +416,7 @@ def run_editing_and_eval_compact(
     model_override: str | None,
     seed_override: int | None,
     dry_run: bool,
-) -> tuple[bool, dict[str, Any] | None]:
+) -> tuple[bool, dict[str, Any] | None, RunResult | None]:
     if not dry_run and not skip_exists and pred_root.exists():
         print(f"[INFO] 清理旧的输出目录: {pred_root}")
         shutil.rmtree(pred_root)
@@ -456,8 +456,8 @@ def run_editing_and_eval_compact(
         )
         if success:
             print("[DRY-RUN] 仅展示首个 case 的解析配置，提前结束。")
-            return True, None
-        return False, None
+            return True, None, None
+        return False, None, None
 
     pending_jobs, skip_count = _prepare_jobs(
         gt_root=gt_root,
@@ -494,37 +494,28 @@ def run_editing_and_eval_compact(
         print(f"[WARNING] 失败案例: {failure_count} 个")
     if success_count == 0:
         print("[ERROR] 没有成功的编辑结果")
-        return False, None
-
-    if skip_benchmark_render:
-        print("\n[INFO] 跳过 Edit3D-Bench 渲染步骤")
-    else:
-        print("\n" + "=" * 80)
-        print("步骤 2/4: 统一渲染所有结果")
-        print("=" * 80)
-        render_success = render_all_results(
-            pred_root,
-            gpu_ids=gpu_ids,
-            metrics=metrics,
-        )
-        if not render_success:
-            print("[WARNING] 渲染失败")
+        return False, None, None
 
     print("\n" + "=" * 80)
-    print("步骤 3/4: 运行评测")
+    print("步骤 2/4: 运行单图 benchmark 渲染 + 评测")
     print("=" * 80)
     eval_output_dir = pred_root / "evaluation_output"
-    success, results = run_evaluation(
+    success, results, run_result = run_evaluation(
         gt_root=gt_root,
         pred_root=pred_root,
         metrics=metrics,
         output_dir=eval_output_dir,
         device=device,
+        render_gpu_ids=gpu_ids,
+        skip_render=skip_benchmark_render,
+        cases=cases,
+        batch_size=32,
+        num_workers=4,
     )
     if not success:
         print("[WARNING] 评测失败")
-        return True, None
-    return True, results
+        return True, None, None
+    return True, results, run_result
 
 
 def main() -> int:
@@ -625,7 +616,7 @@ def main() -> int:
     )
 
     start_time = time.time()
-    success, results = run_editing_and_eval_compact(
+    success, results, run_result = run_editing_and_eval_compact(
         gt_root=gt_root,
         pred_root=pred_root,
         entrypoint_name=entrypoint_name,
@@ -654,12 +645,8 @@ def main() -> int:
             entrypoint_name=entrypoint_name,
             config_name=config_name,
             run_group=run_group,
-            gt_root=gt_root,
-            cases=cases,
-            requested_metrics=list(metrics),
             benchmark_root=benchmark_root,
-            skip_benchmark_render=skip_benchmark_render,
-            results=results,
+            run_result=run_result,
             total_time=total_time,
         )
 

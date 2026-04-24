@@ -27,12 +27,13 @@ from typing import Any
 import yaml
 
 from trellis_edit.common import build_experiment_output_layout, ensure_dir, write_json
-from trellis_edit.benchmarking import (
-    DEFAULT_BENCHMARK_ROOT,
-    build_daily_index,
-    build_focus_index,
-    create_daily_benchmark_bundle,
+from trellis_edit.benchmark_pages import DEFAULT_BENCHMARK_ROOT
+from trellis_edit.benchmarks import (
+    RunResult,
+    create_daily_bundle_from_run_result,
+    rebuild_benchmark_indexes,
 )
+from trellis_edit.benchmarks.tasks import run_single_view_benchmark
 from trellis_edit.composable import get_entrypoint, has_entrypoint
 from trellis_edit.utils.voxel_mesh_converter import (
     load_coords_from_file,
@@ -289,11 +290,6 @@ def estimate_remaining_time(*, elapsed_seconds: float, finished_cases: int, tota
     return format_time(eta_seconds)
 
 
-def metrics_require_video(metrics: list[str]) -> bool:
-    requested = {metric.strip().lower() for metric in metrics}
-    return "fvd" in requested
-
-
 def case_identifier(dataset: str, object_name: str, prompt_id: int) -> str:
     safe_object_name = object_name.replace("/", "_").replace(" ", "_")
     return f"{dataset}__{safe_object_name}__prompt_{prompt_id}"
@@ -468,88 +464,6 @@ def copy_source_voxelmesh_artifacts(
     return [voxel_mesh_path, transform_path]
 
 
-def render_all_results(
-    output_root: Path,
-    *,
-    gpu_ids: list[str],
-    metrics: list[str],
-) -> bool:
-    render_dir = Path("VoxHammer/Edit3D-Bench")
-    if not render_dir.exists():
-        render_dir = Path("../VoxHammer/Edit3D-Bench")
-    if not render_dir.exists():
-        print("[ERROR] 找不到渲染脚本")
-        return False
-
-    if not gpu_ids:
-        raise RuntimeError("Render stage requires at least one GPU id.")
-
-    skip_video = not metrics_require_video(metrics)
-    render_logs_dir = ensure_dir(output_root / "_render_logs")
-    processes: list[tuple[str, subprocess.Popen[str], Any, Path]] = []
-    shard_count = len(gpu_ids)
-
-    print(
-        f"[Render] Using {shard_count} GPU shard(s): "
-        + ", ".join(f"cuda:{gpu_id}" for gpu_id in gpu_ids)
-    )
-    print(f"[Render] Skip video: {'yes' if skip_video else 'no'}")
-
-    for shard_id, gpu_id in enumerate(gpu_ids):
-        env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = gpu_id
-        env.setdefault("PYTHONUNBUFFERED", "1")
-
-        cmd = [
-            sys.executable,
-            "render.py",
-            "--base_dir",
-            str(output_root.resolve()),
-            "--num_shards",
-            str(shard_count),
-            "--shard_id",
-            str(shard_id),
-            "--quiet_blender",
-            "--skip_existing",
-        ]
-        if skip_video:
-            cmd.append("--skip_video")
-
-        log_path = render_logs_dir / f"render_shard_{shard_id}.log"
-        log_handle = open(log_path, "w", encoding="utf-8")
-        process = subprocess.Popen(
-            cmd,
-            cwd=render_dir,
-            env=env,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        processes.append((gpu_id, process, log_handle, log_path))
-        print(f"[Render] Launch shard {shard_id + 1}/{shard_count} on cuda:{gpu_id} -> {log_path}")
-
-    success = True
-    for gpu_id, process, log_handle, log_path in processes:
-        returncode = process.wait(timeout=7200)
-        log_handle.close()
-        if returncode != 0:
-            print(f"[Render] Shard on cuda:{gpu_id} failed -> {log_path}")
-            success = False
-            continue
-
-        tail = ""
-        try:
-            lines = log_path.read_text(encoding="utf-8").splitlines()
-            tail = "\n".join(lines[-4:])
-        except Exception:
-            tail = ""
-        print(f"[Render] Shard on cuda:{gpu_id} finished")
-        if tail:
-            print(tail)
-
-    return success
-
-
 def run_evaluation(
     *,
     gt_root: Path,
@@ -557,43 +471,31 @@ def run_evaluation(
     metrics: list[str],
     output_dir: Path,
     device: str = "cuda:0",
-) -> tuple[bool, dict[str, Any] | None]:
-    eval_script = Path("VoxHammer/Edit3D-Bench/eval_main.py")
-    if not eval_script.exists():
-        eval_script = Path("../VoxHammer/Edit3D-Bench/eval_main.py")
-    if not eval_script.exists():
-        print("[ERROR] 找不到评测脚本")
-        return False, None
-
-    cmd = [
-        sys.executable,
-        str(eval_script),
-        "--gt_root",
-        str(gt_root),
-        "--pred_root",
-        str(pred_root),
-        "--metrics",
-        *metrics,
-        "--device",
-        device,
-        "--batch_size",
-        "32",
-        "--output_dir",
-        str(output_dir),
-    ]
-    returncode, stdout, stderr = run_command(cmd, timeout=7200)
-    if stdout:
-        print(stdout)
-    if stderr:
-        print(f"[STDERR] {stderr}")
-    if returncode != 0:
-        return False, None
-
-    summary_file = output_dir / "summary.json"
-    if not summary_file.exists():
-        return False, None
-    with open(summary_file, "r", encoding="utf-8") as handle:
-        return True, json.load(handle)
+    render_gpu_ids: list[str] | None = None,
+    skip_render: bool = True,
+    cases: list[tuple[str, str, int]] | None = None,
+    batch_size: int = 32,
+    num_workers: int = 4,
+) -> tuple[bool, dict[str, Any] | None, RunResult | None]:
+    ensure_dir(output_dir)
+    try:
+        run_result = run_single_view_benchmark(
+            gt_root=gt_root,
+            pred_root=pred_root,
+            metrics=metrics,
+            output_dir=output_dir,
+            device=device,
+            render_gpu_ids=render_gpu_ids,
+            skip_render=skip_render,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            cases=cases,
+        )
+    except Exception as exc:
+        print(f"[ERROR] 单图评测失败: {exc}")
+        return False, None, None
+    summary_payload = dict(run_result.run_artifacts.get("summary_payload") or {})
+    return True, summary_payload, run_result
 
 
 def save_results(
@@ -602,40 +504,29 @@ def save_results(
     entrypoint_name: str,
     config_name: str,
     run_group: str | None,
-    gt_root: Path,
-    cases: list[tuple[str, str, int]],
-    requested_metrics: list[str],
     benchmark_root: Path,
-    skip_benchmark_render: bool,
-    results: dict[str, Any] | None,
+    run_result: RunResult | None,
     total_time: float,
 ) -> None:
-    if results is None:
+    if run_result is None:
         return
 
-    print("\n[4/4] 保存 benchmark daily 结果...")
-    bundle_root = create_daily_benchmark_bundle(
-        benchmark_root=benchmark_root,
+    print("\n[Save] 保存 benchmark daily 结果...")
+    bundle_root = create_daily_bundle_from_run_result(
+        daily_root=benchmark_root / "daily",
+        pred_root=output_root,
         entrypoint_name=entrypoint_name,
         config_name=config_name,
         run_group=run_group,
-        gt_root=gt_root,
-        pred_root=output_root,
-        cases=cases,
-        requested_metrics=requested_metrics,
-        summary_results=results,
         total_time_seconds=total_time,
-        skip_benchmark_render=skip_benchmark_render,
+        run_result=run_result,
     )
-    daily_index = build_daily_index(benchmark_root)
-    focus_index = build_focus_index(benchmark_root)
+    rebuild_benchmark_indexes(benchmark_root=benchmark_root)
 
     print(f"[INFO] daily 结果已保存到: {bundle_root}")
     print(f"[INFO] - 总览页面: {bundle_root / 'index.html'}")
-    if daily_index is not None:
-        print(f"[INFO] - daily 集合页: {daily_index}")
-    if focus_index is not None:
-        print(f"[INFO] - focus 总览: {focus_index}")
+    print(f"[INFO] - daily 集合页: {benchmark_root / 'daily' / 'index.html'}")
+    print(f"[INFO] - focus 总览: {benchmark_root / 'focus' / 'index.html'}")
     print(f"[INFO] - 原始评测数据: {output_root}")
 
 
@@ -1022,7 +913,7 @@ def run_editing_and_eval(
     model_override: str | None,
     seed_override: int | None,
     dry_run: bool,
-) -> tuple[bool, dict[str, Any] | None]:
+) -> tuple[bool, dict[str, Any] | None, RunResult | None]:
     if not dry_run and not skip_exists and pred_root.exists():
         print(f"[INFO] 清理旧的输出目录: {pred_root}")
         shutil.rmtree(pred_root)
@@ -1057,7 +948,7 @@ def run_editing_and_eval(
     )
     if dry_run:
         print("[DRY-RUN] 仅展示首个 case 的解析配置，提前结束。")
-        return True, None
+        return True, None, None
 
     print(f"\n[INFO] 编辑完成: {success_count}/{len(cases)} 成功")
     if skip_count > 0:
@@ -1066,39 +957,30 @@ def run_editing_and_eval(
         print(f"[WARNING] 失败案例: {failure_count} 个")
     if success_count == 0 and skip_count == 0:
         print("[ERROR] 没有成功的编辑结果")
-        return False, None
+        return False, None, None
     if success_count == 0 and skip_count > 0:
         print("[INFO] 没有新生成结果，使用已存在的 edit.glb 继续后续渲染与评测")
 
-    if skip_benchmark_render:
-        print("\n[INFO] 跳过 Edit3D-Bench 渲染步骤")
-    else:
-        print("\n" + "=" * 80)
-        print("步骤 2/4: 统一渲染所有结果")
-        print("=" * 80)
-        render_success = render_all_results(
-            pred_root,
-            gpu_ids=gpu_ids,
-            metrics=metrics,
-        )
-        if not render_success:
-            print("[WARNING] 渲染失败")
-
     print("\n" + "=" * 80)
-    print("步骤 3/4: 运行评测")
+    print("步骤 2/4: 运行单图 benchmark 渲染 + 评测")
     print("=" * 80)
     eval_output_dir = pred_root / "evaluation_output"
-    success, results = run_evaluation(
+    success, results, run_result = run_evaluation(
         gt_root=gt_root,
         pred_root=pred_root,
         metrics=metrics,
         output_dir=eval_output_dir,
         device=device,
+        render_gpu_ids=gpu_ids,
+        skip_render=skip_benchmark_render,
+        cases=cases,
+        batch_size=32,
+        num_workers=4,
     )
     if not success:
         print("[WARNING] 评测失败")
-        return True, None
-    return True, results
+        return True, None, None
+    return True, results, run_result
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1317,7 +1199,7 @@ def main() -> int:
     )
 
     start_time = time.time()
-    success, results = run_editing_and_eval(
+    success, results, run_result = run_editing_and_eval(
         gt_root=gt_root,
         pred_root=pred_root,
         entrypoint_name=entrypoint_name,
@@ -1346,12 +1228,8 @@ def main() -> int:
             entrypoint_name=entrypoint_name,
             config_name=config_name,
             run_group=run_group,
-            gt_root=gt_root,
-            cases=cases,
-            requested_metrics=list(metrics),
             benchmark_root=benchmark_root,
-            skip_benchmark_render=skip_benchmark_render,
-            results=results,
+            run_result=run_result,
             total_time=total_time,
         )
 
