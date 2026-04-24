@@ -69,6 +69,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config-name", type=str, default="")
     parser.add_argument("--run-group", type=str, default="basic_baselines")
     parser.add_argument("--hunyuan-model", type=str, default=DEFAULT_HUNYUAN_MODEL)
+    parser.add_argument("--hunyuan-octree-res", type=int, default=256)
+    parser.add_argument("--hunyuan-chunk-size", type=int, default=8000)
     parser.add_argument("--ultrashape-config", type=Path, default=DEFAULT_ULTRASHAPE_CONFIG)
     parser.add_argument("--ultrashape-ckpt", type=Path, default=DEFAULT_ULTRASHAPE_CKPT)
     parser.add_argument("--steps", type=int, default=4, help="UltraShape refine steps for direct mode.")
@@ -76,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--num-latents",
         type=int,
         default=8192,
-        help="UltraShape direct mode latent count.",
+        help="UltraShape latent count for direct and autoencode modes.",
     )
     parser.add_argument(
         "--chunk-size",
@@ -102,15 +104,11 @@ def _default_config_name(mode: str) -> str:
 
 
 def _manifest_filename(mode: str) -> str:
-    if mode == "direct":
-        return "direct_manifest.json"
-    return "autoencode_manifest.json"
+    return "manifest.json"
 
 
 def _failures_filename(mode: str) -> str:
-    if mode == "direct":
-        return "direct_failures.json"
-    return "autoencode_failures.json"
+    return "failures.json"
 
 
 def _method_name(mode: str) -> str:
@@ -229,6 +227,10 @@ def _run_case(
             [
                 "--hunyuan-model",
                 args.hunyuan_model,
+                "--hunyuan-octree-res",
+                str(args.hunyuan_octree_res),
+                "--hunyuan-chunk-size",
+                str(args.hunyuan_chunk_size),
                 "--seed",
                 str(case_seed),
                 "--steps",
@@ -240,7 +242,14 @@ def _run_case(
             ]
         )
     else:
-        cmd.extend(["--chunk-size", str(chunk_size or 8000)])
+        cmd.extend(
+            [
+                "--num-latents",
+                str(args.num_latents),
+                "--chunk-size",
+                str(chunk_size or 8000),
+            ]
+        )
 
     started_at = time.time()
     result = subprocess.run(cmd, cwd=REPO_ROOT, text=True)
@@ -256,7 +265,7 @@ def _run_case(
         "object_name": object_name,
         "prompt_id": prompt_id,
         "glb_path": str(output_glb),
-        "total_seconds": round(time.time() - started_at, 3),
+        "total_time_seconds": round(time.time() - started_at, 3),
         "resumed": False,
         "created_at": utc_now_iso(),
     }
@@ -366,17 +375,20 @@ def main() -> None:
         write_json(
             manifest_path,
             {
+                "entrypoint": method_name,
                 "config_name": args.config_name,
-                "run_group": args.run_group,
-                "run_name": args.output_root.name,
-                "method": method_name,
+                "group": args.run_group,
                 "device": args.device,
                 "mode": args.mode,
                 "seed": args.seed,
+                "num_latents": int(args.num_latents),
+                "hunyuan_octree_res": int(args.hunyuan_octree_res),
+                "hunyuan_chunk_size": int(args.hunyuan_chunk_size),
                 "case_shard_count": args.case_shard_count,
                 "case_shard_index": args.case_shard_index,
                 "drop_normal": bool(args.drop_normal),
                 "failed_cases": failed_cases,
+                "total_time_seconds": round(time.time() - start_time, 3),
                 "cases": [
                     {
                         "dataset": case_dataset,
@@ -393,11 +405,11 @@ def main() -> None:
             print(f"[Stop] Reached max new cases for this run: {new_case_count}/{args.max_new_cases}")
             break
 
+    total_time = round(time.time() - start_time, 3)
     summary = {
+        "entrypoint": method_name,
         "config_name": args.config_name,
-        "run_group": args.run_group,
-        "run_name": args.output_root.name,
-        "method": method_name,
+        "group": args.run_group,
         "device": args.device,
         "mode": args.mode,
         "num_selected_cases": len(cases),
@@ -405,8 +417,11 @@ def main() -> None:
         "num_generated_cases": len(manifest_cases),
         "num_failed_cases": len(failed_cases),
         "new_cases_this_run": new_case_count,
+        "num_latents": int(args.num_latents),
+        "hunyuan_octree_res": int(args.hunyuan_octree_res),
+        "hunyuan_chunk_size": int(args.hunyuan_chunk_size),
         "drop_normal": bool(args.drop_normal),
-        "total_seconds": round(time.time() - start_time, 3),
+        "total_time_seconds": total_time,
         "created_at": utc_now_iso(),
     }
     write_json(args.output_root / "summary.json", summary)

@@ -45,6 +45,7 @@ DEFAULT_DATASET_ROOT = Path(
 DEFAULT_OUTPUT_ROOT = Path(
     "/cache/wangxinxing/data/trellis_edit_benchmark/pred_mv"
 )
+ENTRYPOINT_NAME = "trellis_mv_batch_generate_from_targets"
 
 
 @dataclass(frozen=True)
@@ -555,6 +556,12 @@ def build_manifest(
     started_at: str,
     completed_at: Optional[str] = None,
 ) -> Dict[str, Any]:
+    total_time_seconds: float | None = None
+    if completed_at:
+        total_time_seconds = (
+            datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)
+        ).total_seconds()
+
     counts: Dict[str, int] = {}
     for status_info in case_statuses.values():
         status = str(status_info.get("status", "pending"))
@@ -594,9 +601,12 @@ def build_manifest(
         )
 
     return {
-        "run_name": run_dir.name,
+        "entrypoint": ENTRYPOINT_NAME,
+        "config_name": run_dir.name,
+        "group": "mv",
         "created_at": started_at,
         "completed_at": completed_at,
+        "total_time_seconds": total_time_seconds,
         "dataset_root": str(args.dataset_root.resolve()),
         "output_root": str(args.output_root.resolve()),
         "run_dir": str(run_dir.resolve()),

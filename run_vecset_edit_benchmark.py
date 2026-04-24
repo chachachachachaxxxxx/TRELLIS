@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 from run_batch_edit_and_eval import (
-    render_all_results,
     run_evaluation,
     save_results,
 )
@@ -194,10 +193,9 @@ def _write_summary(
     skipped_count = int(manifest.get("skipped_count") or 0)
     generated_count = _count_existing_outputs(output_root, cases)
     payload = {
+        "entrypoint": "vecset_edit",
         "config_name": args.config_name,
-        "run_group": args.run_group,
-        "run_name": output_root.name,
-        "method": "vecset_edit",
+        "group": args.run_group,
         "device": args.device,
         "eval_device": args.eval_device or args.device,
         "render_gpu_ids": parse_render_gpu_ids(args.render_gpus, device=args.device),
@@ -215,7 +213,7 @@ def _write_summary(
         "object_name": args.object_name or None,
         "prompt_id": int(args.prompt_id) if int(args.prompt_id) > 0 else None,
         "seed": int(args.seed),
-        "total_seconds": round(float(total_seconds), 3),
+        "total_time_seconds": round(float(total_seconds), 3),
         "created_at": utc_now_iso(),
     }
     write_json(output_root / "summary.json", payload)
@@ -304,20 +302,19 @@ def main() -> None:
     render_gpu_ids = parse_render_gpu_ids(args.render_gpus, device=args.device)
     eval_device = args.eval_device or args.device
 
-    print("[Render] Rendering benchmark views...")
-    if not render_all_results(args.output_root, gpu_ids=render_gpu_ids, metrics=list(args.metrics)):
-        raise RuntimeError("Benchmark rendering failed.")
-
-    print("[Eval] Running benchmark evaluation...")
+    print("[Eval] Running single-view benchmark render + evaluation...")
     eval_output_dir = ensure_dir(args.output_root / "evaluation_output")
-    ok, results = run_evaluation(
+    ok, results, run_result = run_evaluation(
         gt_root=args.gt_root,
         pred_root=args.output_root,
         metrics=list(args.metrics),
         output_dir=eval_output_dir,
         device=eval_device,
+        render_gpu_ids=render_gpu_ids,
+        skip_render=False,
+        cases=cases,
     )
-    if not ok or results is None:
+    if not ok or results is None or run_result is None:
         raise RuntimeError("Benchmark evaluation failed.")
 
     total_time = time.time() - start_time
@@ -326,15 +323,11 @@ def main() -> None:
         entrypoint_name="vecset_edit",
         config_name=args.config_name,
         run_group=args.run_group,
-        gt_root=args.gt_root,
-        cases=cases,
-        requested_metrics=list(args.metrics),
         benchmark_root=args.benchmark_root,
-        skip_benchmark_render=False,
-        results=results,
+        run_result=run_result,
         total_time=total_time,
     )
-    summary["total_seconds"] = round(float(total_time), 3)
+    summary["total_time_seconds"] = round(float(total_time), 3)
     summary["generate_only"] = False
     write_json(args.output_root / "summary.json", summary)
     print(f"[Done] VecSet edit benchmark finished in {total_time:.1f}s")

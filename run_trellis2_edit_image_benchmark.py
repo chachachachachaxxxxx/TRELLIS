@@ -17,7 +17,6 @@ from PIL import Image
 
 from run_batch_edit_and_eval import (
     DEFAULT_METRICS,
-    render_all_results,
     run_evaluation,
     save_results,
 )
@@ -28,6 +27,7 @@ DEFAULT_GT_ROOT = Path("/cache/wangxinxing/data/trellis_edit_benchmark/edit3d_da
 DEFAULT_OUTPUT_ROOT = Path("/cache/wangxinxing/data/trellis_edit_benchmark/pred/trellis2_direct_edit_image")
 DEFAULT_MODEL = "microsoft/TRELLIS.2-4B"
 DEFAULT_QUALITY = "balanced"
+ENTRYPOINT_NAME = "trellis2_direct_edit_image"
 TRELLIS2_REPO = Path("/home/wangxinxing/3dlocaledit/TRELLIS.2")
 
 
@@ -583,14 +583,14 @@ def _shard_state_dir(output_root: Path) -> Path:
 
 def _shard_manifest_path(output_root: Path, *, shard_count: int, shard_index: int) -> Path:
     if shard_count <= 1:
-        return output_root / "direct_manifest.json"
-    return _shard_state_dir(output_root) / f"direct_manifest_shard_{shard_index:02d}_of_{shard_count:02d}.json"
+        return output_root / "manifest.json"
+    return _shard_state_dir(output_root) / f"manifest_shard_{shard_index:02d}_of_{shard_count:02d}.json"
 
 
 def _shard_failures_path(output_root: Path, *, shard_count: int, shard_index: int) -> Path:
     if shard_count <= 1:
-        return output_root / "direct_failures.json"
-    return _shard_state_dir(output_root) / f"direct_failures_shard_{shard_index:02d}_of_{shard_count:02d}.json"
+        return output_root / "failures.json"
+    return _shard_state_dir(output_root) / f"failures_shard_{shard_index:02d}_of_{shard_count:02d}.json"
 
 
 def _write_manifest_payload(
@@ -614,37 +614,39 @@ def _write_manifest_payload(
     cases: list[tuple[str, str, int]],
     manifest_cases: dict[str, Any],
     failed_cases: dict[str, Any],
+    total_time_seconds: float | None = None,
 ) -> None:
-    write_json(
-        manifest_path,
-        {
-            "config_name": config_name,
-            "run_group": run_group,
-            "model": model,
-            "device": device,
-            "eval_device": eval_device,
-            "generate_gpu_ids": generate_gpu_ids,
-            "render_gpu_ids": render_gpu_ids,
-            "seed": seed,
-            "num_samples": num_samples,
-            "quality": quality,
-            "drop_normal": drop_normal,
-            "case_shard_count": case_shard_count,
-            "case_shard_index": case_shard_index,
-            "generation_shard_count": generation_shard_count,
-            "metrics": metrics,
-            "failed_cases": failed_cases,
-            "cases": [
-                {
-                    "dataset": case_dataset,
-                    "object_name": case_object_name,
-                    "prompt_id": case_prompt_id,
-                }
-                for case_dataset, case_object_name, case_prompt_id in cases
-            ],
-            "generated_cases": manifest_cases,
-        },
-    )
+    payload = {
+        "entrypoint": ENTRYPOINT_NAME,
+        "config_name": config_name,
+        "group": run_group,
+        "model": model,
+        "device": device,
+        "eval_device": eval_device,
+        "generate_gpu_ids": generate_gpu_ids,
+        "render_gpu_ids": render_gpu_ids,
+        "seed": seed,
+        "num_samples": num_samples,
+        "quality": quality,
+        "drop_normal": drop_normal,
+        "case_shard_count": case_shard_count,
+        "case_shard_index": case_shard_index,
+        "generation_shard_count": generation_shard_count,
+        "metrics": metrics,
+        "failed_cases": failed_cases,
+        "cases": [
+            {
+                "dataset": case_dataset,
+                "object_name": case_object_name,
+                "prompt_id": case_prompt_id,
+            }
+            for case_dataset, case_object_name, case_prompt_id in cases
+        ],
+        "generated_cases": manifest_cases,
+    }
+    if total_time_seconds is not None:
+        payload["total_time_seconds"] = round(float(total_time_seconds), 3)
+    write_json(manifest_path, payload)
 
 
 def _load_json_payload(path: Path) -> dict[str, Any]:
@@ -661,6 +663,7 @@ def _merge_shard_outputs(
     eval_device: str,
     generate_gpu_ids: list[str],
     render_gpu_ids: list[str],
+    total_time_seconds: float | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     merged_cases: dict[str, Any] = {}
     merged_failures: dict[str, Any] = {}
@@ -676,8 +679,8 @@ def _merge_shard_outputs(
         merged_failures.update(manifest_payload.get("failed_cases") or {})
         merged_failures.update(failure_payload.get("cases") or {})
 
-    manifest_path = output_root / "direct_manifest.json"
-    failures_path = output_root / "direct_failures.json"
+    manifest_path = output_root / "manifest.json"
+    failures_path = output_root / "failures.json"
     _write_manifest_payload(
         manifest_path=manifest_path,
         config_name=args.config_name,
@@ -698,6 +701,7 @@ def _merge_shard_outputs(
         cases=cases,
         manifest_cases=merged_cases,
         failed_cases=merged_failures,
+        total_time_seconds=total_time_seconds,
     )
     if merged_failures:
         write_json(failures_path, {"cases": merged_failures})
@@ -844,6 +848,7 @@ def main() -> None:
         if not args.resume:
             shutil.rmtree(output_root)
     ensure_dir(output_root)
+    generation_started = time.time()
 
     if len(generate_gpu_ids) > 1:
         print(f"[Generate] Auto-sharding generation across {len(generate_gpu_ids)} GPU(s): {', '.join(generate_gpu_ids)}")
@@ -860,6 +865,7 @@ def main() -> None:
             eval_device=eval_device,
             generate_gpu_ids=generate_gpu_ids,
             render_gpu_ids=render_gpu_ids,
+            total_time_seconds=time.time() - generation_started,
         )
         if args.generate_only:
             print(
@@ -873,20 +879,19 @@ def main() -> None:
         if len(manifest_cases) < len(cases):
             raise RuntimeError("Multi-GPU generation did not produce all requested cases.")
         start_time = time.time()
-        print("[Render] Rendering benchmark views...")
-        if not render_all_results(output_root, gpu_ids=render_gpu_ids, metrics=list(args.metrics)):
-            raise RuntimeError("Benchmark rendering failed.")
-
-        print("[Eval] Running benchmark evaluation...")
+        print("[Eval] Running single-view benchmark render + evaluation...")
         eval_output_dir = ensure_dir(output_root / "evaluation_output")
-        ok, summary = run_evaluation(
+        ok, summary, run_result = run_evaluation(
             gt_root=gt_root,
             pred_root=output_root,
             metrics=list(args.metrics),
             output_dir=eval_output_dir,
             device=eval_device,
+            render_gpu_ids=render_gpu_ids,
+            skip_render=False,
+            cases=cases,
         )
-        if not ok or summary is None:
+        if not ok or summary is None or run_result is None:
             raise RuntimeError("Benchmark evaluation failed.")
 
         total_time = time.time() - start_time
@@ -895,12 +900,8 @@ def main() -> None:
             entrypoint_name="baseline",
             config_name=args.config_name,
             run_group=args.run_group,
-            gt_root=gt_root,
-            cases=cases,
-            requested_metrics=list(args.metrics),
             benchmark_root=benchmark_root,
-            skip_benchmark_render=False,
-            results=summary,
+            run_result=run_result,
             total_time=total_time,
         )
         print(f"[Done] TRELLIS.2 direct-edit benchmark finished in {total_time:.1f}s")
@@ -965,6 +966,7 @@ def main() -> None:
         cases=cases,
         manifest_cases=manifest_cases,
         failed_cases=failed_cases,
+        total_time_seconds=time.time() - generation_started,
     )
     if failed_cases:
         write_json(failed_cases_path, {"cases": failed_cases})
@@ -1061,6 +1063,7 @@ def main() -> None:
                 cases=cases,
                 manifest_cases=manifest_cases,
                 failed_cases=failed_cases,
+                total_time_seconds=time.time() - generation_started,
             )
             if args.max_new_cases > 0 and new_case_count >= args.max_new_cases:
                 print(
@@ -1077,20 +1080,19 @@ def main() -> None:
         print(f"[Done] Pred root: {output_root}")
         return
 
-    print("[Render] Rendering benchmark views...")
-    if not render_all_results(output_root, gpu_ids=render_gpu_ids, metrics=list(args.metrics)):
-        raise RuntimeError("Benchmark rendering failed.")
-
-    print("[Eval] Running benchmark evaluation...")
+    print("[Eval] Running single-view benchmark render + evaluation...")
     eval_output_dir = ensure_dir(output_root / "evaluation_output")
-    ok, summary = run_evaluation(
+    ok, summary, run_result = run_evaluation(
         gt_root=gt_root,
         pred_root=output_root,
         metrics=list(args.metrics),
         output_dir=eval_output_dir,
         device=eval_device,
+        render_gpu_ids=render_gpu_ids,
+        skip_render=False,
+        cases=shard_cases,
     )
-    if not ok or summary is None:
+    if not ok or summary is None or run_result is None:
         raise RuntimeError("Benchmark evaluation failed.")
 
     total_time = time.time() - start_time
@@ -1099,12 +1101,8 @@ def main() -> None:
         entrypoint_name="baseline",
         config_name=args.config_name,
         run_group=args.run_group,
-        gt_root=gt_root,
-        cases=cases,
-        requested_metrics=list(args.metrics),
         benchmark_root=benchmark_root,
-        skip_benchmark_render=False,
-        results=summary,
+        run_result=run_result,
         total_time=total_time,
     )
     print(f"[Done] TRELLIS.2 direct-edit benchmark finished in {total_time:.1f}s")

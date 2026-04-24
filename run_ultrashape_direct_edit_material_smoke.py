@@ -50,6 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prompt-id", type=int, default=1)
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--hunyuan-model", type=str, default=DEFAULT_HUNYUAN_MODEL)
+    parser.add_argument("--hunyuan-octree-res", type=int, default=256)
+    parser.add_argument("--hunyuan-chunk-size", type=int, default=8000)
     parser.add_argument("--ultrashape-config", type=Path, default=DEFAULT_ULTRASHAPE_CONFIG)
     parser.add_argument("--ultrashape-ckpt", type=Path, default=DEFAULT_ULTRASHAPE_CKPT)
     parser.add_argument("--seed", type=int, default=1)
@@ -113,6 +115,8 @@ def main() -> None:
         "requested_device": requested_device,
         "device": args.device,
         "hunyuan_model": args.hunyuan_model,
+        "hunyuan_octree_res": int(args.hunyuan_octree_res),
+        "hunyuan_chunk_size": int(args.hunyuan_chunk_size),
         "ultrashape_config": str(args.ultrashape_config),
         "ultrashape_ckpt": str(args.ultrashape_ckpt),
         "seed": int(args.seed),
@@ -143,7 +147,11 @@ def main() -> None:
 
             coarse_started = time.time()
             set_seed(args.seed)
-            coarse_mesh = shape_bundle["shape_pipeline"](image=image)[0]
+            coarse_mesh = shape_bundle["shape_pipeline"](
+                image=image,
+                octree_resolution=args.hunyuan_octree_res,
+                num_chunks=args.hunyuan_chunk_size,
+            )[0]
             coarse_mesh.export(coarse_white_mesh_path)
             run_payload["coarse_shape_seconds"] = round(time.time() - coarse_started, 3)
             run_payload["coarse_white_mesh_path"] = str(coarse_white_mesh_path)
@@ -216,7 +224,7 @@ def main() -> None:
     release_cuda_memory()
 
     run_payload["edit_glb_path"] = str(edit_glb_path)
-    run_payload["total_seconds"] = round(time.time() - total_started, 3)
+    run_payload["total_time_seconds"] = round(time.time() - total_started, 3)
     write_json(output_dir / "run.json", run_payload)
     print(f"[Done] UltraShape direct textured smoke output: {edit_glb_path}")
 

@@ -48,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--ultrashape-config", type=Path, default=DEFAULT_ULTRASHAPE_CONFIG)
     parser.add_argument("--ultrashape-ckpt", type=Path, default=DEFAULT_ULTRASHAPE_CKPT)
+    parser.add_argument("--num-latents", type=int, default=8192)
     parser.add_argument("--chunk-size", type=int, default=8000)
     parser.add_argument("--octree-res", type=int, default=256)
     parser.add_argument("--drop-normal", action="store_true")
@@ -107,6 +108,7 @@ def main() -> None:
         "device": args.device,
         "ultrashape_config": str(args.ultrashape_config),
         "ultrashape_ckpt": str(args.ultrashape_ckpt),
+        "ultrashape_num_latents": int(args.num_latents),
         "ultrashape_chunk_size": int(args.chunk_size),
         "ultrashape_octree_res": int(args.octree_res),
         "drop_normal": bool(args.drop_normal),
@@ -129,6 +131,7 @@ def main() -> None:
                 config_path=args.ultrashape_config,
                 ckpt_path=args.ultrashape_ckpt,
                 device=args.device,
+                num_latents=args.num_latents,
             )
             reconstruct_stats = ultrashape_autoencode_to_mesh(
                 vae_bundle=vae_bundle,
@@ -181,7 +184,7 @@ def main() -> None:
     release_cuda_memory()
 
     run_payload["edit_glb_path"] = str(edit_glb_path)
-    run_payload["total_seconds"] = round(time.time() - total_started, 3)
+    run_payload["total_time_seconds"] = round(time.time() - total_started, 3)
     write_json(output_dir / "run.json", run_payload)
     print(f"[Done] UltraShape autoencode textured smoke output: {edit_glb_path}")
 

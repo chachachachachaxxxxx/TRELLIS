@@ -231,7 +231,7 @@ def main() -> None:
     convert_started = time.time()
     _quick_convert_with_obj2gltf(out_textured_obj, out_textured_glb)
     payload["convert_seconds"] = round(time.time() - convert_started, 3)
-    payload["total_seconds"] = round(time.time() - started_at, 3)
+    payload["total_time_seconds"] = round(time.time() - started_at, 3)
     write_json(out_dir / "run.json", payload)
     print(f"[Done] Joint autoencoder smoke output: {out_textured_glb}")
 

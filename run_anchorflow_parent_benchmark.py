@@ -19,12 +19,11 @@ from run_batch_edit_and_eval import (
     DEFAULT_METRICS,
     load_edit3d_metadata,
     parse_gpu_list,
-    render_all_results,
     run_evaluation,
     save_results,
 )
 from trellis_edit.alignment import export_hunyuan21_glb_to_canonical_space
-from trellis_edit.benchmarking import DEFAULT_BENCHMARK_ROOT
+from trellis_edit.benchmark_pages import DEFAULT_BENCHMARK_ROOT
 from trellis_edit.common import ensure_dir, release_cuda_memory, utc_now_iso, write_json
 from trellis_edit.common.external_3d import (
     load_hunyuan_paint_bundle,
@@ -312,10 +311,9 @@ def _write_manifest(
     write_json(
         manifest_path,
         {
+            "entrypoint": "anchorflow_parent",
             "config_name": args.config_name,
-            "run_group": args.run_group,
-            "run_name": args.output_root.name,
-            "method": "anchorflow_parent",
+            "group": args.run_group,
             "model": args.model,
             "requested_device": requested_device,
             "device": args.device,
@@ -433,7 +431,7 @@ def _run_geometry_case(
         "encode_seconds": encode_seconds,
         "edit_seconds": edit_seconds,
         "decode_seconds": decode_seconds,
-        "total_seconds": round(time.time() - started_at, 3),
+        "total_time_seconds": round(time.time() - started_at, 3),
         "resumed": False,
     }
     write_json(output_dir / "case_geometry.json", payload)
@@ -484,7 +482,7 @@ def _finalize_case(
         "encode_seconds": geometry_payload.get("encode_seconds"),
         "edit_seconds": geometry_payload.get("edit_seconds"),
         "decode_seconds": geometry_payload.get("decode_seconds"),
-        "geometry_total_seconds": geometry_payload.get("total_seconds"),
+        "geometry_total_time_seconds": geometry_payload.get("total_time_seconds"),
         "with_materials": bool(with_materials),
         "drop_normal": bool(drop_normal),
         "resumed": False,
@@ -537,9 +535,12 @@ def _finalize_case(
         )
         payload["align_seconds"] = round(time.time() - align_started, 3)
         payload["postprocess"] = postprocess
-        payload["postprocess_total_seconds"] = round(time.time() - postprocess_started, 3)
-        geometry_total = float(geometry_payload.get("total_seconds") or 0.0)
-        payload["total_seconds"] = round(geometry_total + payload["postprocess_total_seconds"], 3)
+        payload["postprocess_total_time_seconds"] = round(time.time() - postprocess_started, 3)
+        geometry_total = float(geometry_payload.get("total_time_seconds") or 0.0)
+        payload["total_time_seconds"] = round(
+            geometry_total + payload["postprocess_total_time_seconds"],
+            3,
+        )
         write_json(output_dir / "case.json", payload)
         return payload
     finally:
@@ -559,7 +560,7 @@ def _write_summary(
     output_root: Path,
     args: argparse.Namespace,
     cases: list[tuple[str, str, int]],
-    total_seconds: float,
+    total_time_seconds: float,
     requested_device: str,
 ) -> dict[str, Any]:
     manifest = _load_manifest(output_root / "manifest.json")
@@ -571,10 +572,9 @@ def _write_summary(
         if _case_output_glb(output_root, dataset, object_name, prompt_id).is_file():
             generated_count += 1
     payload = {
+        "entrypoint": "anchorflow_parent",
         "config_name": args.config_name,
-        "run_group": args.run_group,
-        "run_name": output_root.name,
-        "method": "anchorflow_parent",
+        "group": args.run_group,
         "model": args.model,
         "requested_device": requested_device,
         "device": args.device,
@@ -605,10 +605,15 @@ def _write_summary(
         "infer": bool(args.infer),
         "with_materials": bool(args.with_materials),
         "drop_normal": bool(args.drop_normal),
-        "total_seconds": round(float(total_seconds), 3),
+        "total_time_seconds": round(float(total_time_seconds), 3),
         "created_at": utc_now_iso(),
     }
     write_json(output_root / "summary.json", payload)
+    manifest["entrypoint"] = "anchorflow_parent"
+    manifest["config_name"] = args.config_name
+    manifest["group"] = args.run_group
+    manifest["total_time_seconds"] = round(float(total_time_seconds), 3)
+    write_json(output_root / "manifest.json", manifest)
     return payload
 
 
@@ -894,7 +899,7 @@ def main() -> int:
         output_root=args.output_root,
         args=args,
         cases=cases,
-        total_seconds=time.time() - started_at,
+        total_time_seconds=time.time() - started_at,
         requested_device=requested_device,
     )
 
@@ -910,22 +915,17 @@ def main() -> int:
     if not render_gpu_ids:
         raise RuntimeError("Render stage requires at least one GPU id.")
 
-    render_success = render_all_results(
-        args.output_root,
-        gpu_ids=render_gpu_ids,
-        metrics=list(args.metrics),
-    )
-    if not render_success:
-        print("[WARNING] Benchmark rendering reported failures.")
-
-    eval_success, results = run_evaluation(
+    eval_success, results, run_result = run_evaluation(
         gt_root=args.gt_root,
         pred_root=args.output_root,
         metrics=list(args.metrics),
         output_dir=args.output_root / "evaluation_output",
         device=args.eval_device or args.device,
+        render_gpu_ids=render_gpu_ids,
+        skip_render=False,
+        cases=shard_cases,
     )
-    if not eval_success or results is None:
+    if not eval_success or results is None or run_result is None:
         raise RuntimeError("Evaluation failed.")
 
     save_results(
@@ -933,12 +933,8 @@ def main() -> int:
         entrypoint_name="anchorflow_parent",
         config_name=args.config_name,
         run_group=args.run_group,
-        gt_root=args.gt_root,
-        cases=cases,
-        requested_metrics=list(args.metrics),
         benchmark_root=args.benchmark_root,
-        skip_benchmark_render=False,
-        results=results,
+        run_result=run_result,
         total_time=time.time() - started_at,
     )
     return 0

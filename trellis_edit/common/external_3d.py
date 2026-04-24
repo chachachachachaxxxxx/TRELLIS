@@ -291,6 +291,7 @@ def load_ultrashape_vae_bundle(
     config_path: Path | str,
     ckpt_path: Path | str,
     device: str,
+    num_latents: int | None = None,
 ) -> dict[str, Any]:
     ensure_ultrashape_import_path()
     from omegaconf import OmegaConf
@@ -298,6 +299,9 @@ def load_ultrashape_vae_bundle(
     from ultrashape.utils.misc import instantiate_from_config
 
     config = OmegaConf.load(str(config_path))
+    vae_params = config.model.params.vae_config.params
+    if num_latents is not None:
+        vae_params.num_latents = int(num_latents)
     vae = instantiate_from_config(config.model.params.vae_config)
     weights = torch.load(str(ckpt_path), map_location="cpu")
     vae.load_state_dict(weights["vae"], strict=True)
@@ -313,6 +317,8 @@ def load_ultrashape_vae_bundle(
         "vae": vae,
         "loader": loader,
         "device": device,
+        "num_latents": int(vae_params.num_latents),
+        "voxel_res": int(vae_params.get("voxel_query_res", 0) or 0),
     }
 
 
@@ -358,6 +364,8 @@ def ultrashape_autoencode_to_mesh(
         "latents_shape": list(latents.shape),
         "decoded_latents_shape": list(decoded_latents.shape),
         "voxel_token_count": int(voxel_idx.shape[1]),
+        "num_latents": int(vae_bundle.get("num_latents") or latents.shape[1]),
+        "voxel_res": int(vae_bundle.get("voxel_res") or 0),
         "reconstructed_mesh_faces": int(mesh.faces.shape[0]),
         "reconstructed_mesh_vertices": int(mesh.vertices.shape[0]),
         "chunk_size": int(chunk_size),

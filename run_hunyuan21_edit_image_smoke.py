@@ -84,6 +84,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--object-name", type=str, default="")
     parser.add_argument("--prompt-id", type=int, default=1)
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL)
+    parser.add_argument("--octree-res", type=int, default=256)
+    parser.add_argument("--chunk-size", type=int, default=8000)
     return parser
 
 
@@ -124,7 +126,10 @@ def main() -> None:
         "output_white_mesh": str(white_mesh_path),
         "output_textured_glb": str(textured_glb_path),
         "model": args.model,
-        "shape_params": "pipeline defaults from Hunyuan3DDiTFlowMatchingPipeline.__call__",
+        "shape_params": {
+            "octree_resolution": int(args.octree_res),
+            "num_chunks": int(args.chunk_size),
+        },
         "paint_params": {
             "max_num_view": 6,
             "resolution": 512,
@@ -143,7 +148,11 @@ def main() -> None:
     started_at = time.time()
     shape_started = time.time()
     shape_pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(args.model)
-    mesh = shape_pipeline(image=image)[0]
+    mesh = shape_pipeline(
+        image=image,
+        octree_resolution=args.octree_res,
+        num_chunks=args.chunk_size,
+    )[0]
     payload["shape_seconds"] = round(time.time() - shape_started, 3)
     white_mesh_path.parent.mkdir(parents=True, exist_ok=True)
     mesh.export(white_mesh_path)
@@ -166,7 +175,7 @@ def main() -> None:
     convert_started = time.time()
     _quick_convert_with_obj2gltf(textured_obj_path, textured_glb_path)
     payload["convert_seconds"] = round(time.time() - convert_started, 3)
-    payload["total_seconds"] = round(time.time() - started_at, 3)
+    payload["total_time_seconds"] = round(time.time() - started_at, 3)
 
     write_json(out_dir / "run.json", payload)
     print(f"[Done] Direct edit-image smoke output: {textured_glb_path}")

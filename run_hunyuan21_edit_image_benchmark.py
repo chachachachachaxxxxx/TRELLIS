@@ -27,6 +27,7 @@ DEFAULT_GT_ROOT = Path("/cache/wangxinxing/data/trellis_edit_benchmark/edit3d_da
 DEFAULT_OUTPUT_ROOT = Path("/cache/wangxinxing/data/trellis_edit_benchmark/pred/baseline_hunyuan21_direct_edit")
 HUNYUAN_ROOT = Path("/home/wangxinxing/3dlocaledit/Hunyuan3D-2.1")
 DEFAULT_MODEL = "tencent/Hunyuan3D-2.1"
+ENTRYPOINT_NAME = "hunyuan21_direct_edit_image"
 REALESRGAN_URL = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
 _DEVICE_REEXEC_FLAG = "TRELLIS_HUNYUAN21_DEVICE_REEXEC"
 _ORIGINAL_DEVICE_ENV = "TRELLIS_HUNYUAN21_ORIGINAL_DEVICE"
@@ -46,6 +47,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--limit", type=int, default=300, help="Number of prompt-level cases to include.")
     parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--octree-res", type=int, default=256, help="Shape mesh extraction octree resolution.")
+    parser.add_argument("--chunk-size", type=int, default=8000, help="Shape mesh extraction query chunk size.")
     parser.add_argument("--resume", action="store_true", help="Resume from existing prompt outputs.")
     parser.add_argument(
         "--max-new-cases",
@@ -249,6 +252,8 @@ def _generate_case(
     background_remover,
     shape_pipeline,
     paint_pipeline,
+    octree_res: int,
+    chunk_size: int,
     drop_normal: bool,
     keep_materials: bool,
 ) -> dict[str, Any]:
@@ -286,7 +291,11 @@ def _generate_case(
             image = _prepare_edit_image(edit_image_path, background_remover)
 
             shape_started = time.time()
-            mesh = shape_pipeline(image=image)[0]
+            mesh = shape_pipeline(
+                image=image,
+                octree_resolution=octree_res,
+                num_chunks=chunk_size,
+            )[0]
             white_mesh_path.parent.mkdir(parents=True, exist_ok=True)
             mesh.export(white_mesh_path)
             shape_seconds = round(time.time() - shape_started, 3)
@@ -332,11 +341,13 @@ def _generate_case(
         "glb_path": str(output_glb),
         "white_mesh_faces": white_mesh_faces,
         "white_mesh_vertices": white_mesh_vertices,
+        "shape_octree_res": int(octree_res),
+        "shape_chunk_size": int(chunk_size),
         "shape_seconds": shape_seconds,
         "paint_seconds": paint_seconds,
         "convert_seconds": convert_seconds,
         "postprocess_seconds": postprocess_seconds,
-        "total_seconds": round(time.time() - started_at, 3),
+        "total_time_seconds": round(time.time() - started_at, 3),
         "postprocess": postprocess_stats,
         "resumed": False,
     }
@@ -378,8 +389,8 @@ def main() -> None:
             shutil.rmtree(output_root)
     ensure_dir(output_root)
 
-    manifest_path = output_root / "direct_manifest.json"
-    failed_cases_path = output_root / "direct_failures.json"
+    manifest_path = output_root / "manifest.json"
+    failed_cases_path = output_root / "failures.json"
     manifest_cases: dict[str, Any] = {}
     failed_cases: dict[str, Any] = {}
     if args.resume and manifest_path.is_file():
@@ -421,6 +432,8 @@ def main() -> None:
                 background_remover=background_remover,
                 shape_pipeline=shape_pipeline,
                 paint_pipeline=paint_pipeline,
+                octree_res=args.octree_res,
+                chunk_size=args.chunk_size,
                 drop_normal=args.drop_normal,
                 keep_materials=args.keep_materials,
             )
@@ -450,19 +463,21 @@ def main() -> None:
         write_json(
             manifest_path,
             {
+                "entrypoint": ENTRYPOINT_NAME,
                 "config_name": args.config_name,
-                "run_group": args.run_group,
-                "run_name": output_root.name,
-                "method": "hunyuan21_direct_edit_image",
+                "group": args.run_group,
                 "model": args.model,
                 "requested_device": requested_device,
                 "device": args.device,
                 "seed": args.seed,
+                "octree_res": int(args.octree_res),
+                "chunk_size": int(args.chunk_size),
                 "case_shard_count": args.case_shard_count,
                 "case_shard_index": args.case_shard_index,
                 "drop_normal": bool(args.drop_normal),
                 "keep_materials": bool(args.keep_materials),
                 "failed_cases": failed_cases,
+                "total_time_seconds": round(time.time() - start_time, 3),
                 "cases": [
                     {
                         "dataset": case_dataset,
@@ -484,13 +499,14 @@ def main() -> None:
 
     total_time = round(time.time() - start_time, 3)
     summary = {
+        "entrypoint": ENTRYPOINT_NAME,
         "config_name": args.config_name,
-        "run_group": args.run_group,
-        "run_name": output_root.name,
-        "method": "hunyuan21_direct_edit_image",
+        "group": args.run_group,
         "model": args.model,
         "requested_device": requested_device,
         "device": args.device,
+        "octree_res": int(args.octree_res),
+        "chunk_size": int(args.chunk_size),
         "num_selected_cases": len(cases),
         "num_shard_cases": total_cases,
         "num_generated_cases": len(manifest_cases),
@@ -498,7 +514,7 @@ def main() -> None:
         "new_cases_this_run": new_case_count,
         "drop_normal": bool(args.drop_normal),
         "keep_materials": bool(args.keep_materials),
-        "total_seconds": total_time,
+        "total_time_seconds": total_time,
         "created_at": utc_now_iso(),
     }
     write_json(output_root / "summary.json", summary)

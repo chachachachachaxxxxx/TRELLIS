@@ -29,6 +29,7 @@ DEFAULT_GT_ROOT = Path("/cache/wangxinxing/data/trellis_edit_benchmark/edit3d_da
 DEFAULT_OUTPUT_ROOT = Path("/cache/wangxinxing/data/trellis_edit_benchmark/pred/baseline_hunyuan21_autoencode")
 HUNYUAN_ROOT = Path("/home/wangxinxing/3dlocaledit/Hunyuan3D-2.1")
 DEFAULT_MODEL = "tencent/Hunyuan3D-2.1"
+ENTRYPOINT_NAME = "hunyuan21_autoencode"
 REALESRGAN_URL = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
 _DEVICE_REEXEC_FLAG = "TRELLIS_HUNYUAN21_DEVICE_REEXEC"
 _ORIGINAL_DEVICE_ENV = "TRELLIS_HUNYUAN21_ORIGINAL_DEVICE"
@@ -436,7 +437,7 @@ def _reconstruct_object(
         "paint_seconds": paint_seconds,
         "convert_seconds": convert_seconds,
         "postprocess_seconds": postprocess_seconds,
-        "total_seconds": round(time.time() - started_at, 3),
+        "total_time_seconds": round(time.time() - started_at, 3),
         "postprocess": postprocess_stats,
         "resumed": False,
     }
@@ -480,8 +481,8 @@ def main() -> None:
             shutil.rmtree(output_root)
     ensure_dir(output_root)
 
-    manifest_path = output_root / "reconstruct_manifest.json"
-    failures_path = output_root / "reconstruct_failures.json"
+    manifest_path = output_root / "manifest.json"
+    failures_path = output_root / "failures.json"
     manifest_objects: dict[str, Any] = {}
     failed_objects: dict[str, Any] = {}
     if args.resume and manifest_path.is_file():
@@ -551,10 +552,9 @@ def main() -> None:
         write_json(
             manifest_path,
             {
+                "entrypoint": ENTRYPOINT_NAME,
                 "config_name": args.config_name,
-                "run_group": args.run_group,
-                "run_name": output_root.name,
-                "method": "hunyuan21_autoencode",
+                "group": args.run_group,
                 "model": args.model,
                 "requested_device": requested_device,
                 "device": args.device,
@@ -563,6 +563,7 @@ def main() -> None:
                 "object_shard_index": args.object_shard_index,
                 "drop_normal": bool(args.drop_normal),
                 "keep_materials": bool(args.keep_materials),
+                "total_time_seconds": round(time.time() - start_time, 3),
                 "cases": [
                     {
                         "dataset": case_dataset,
@@ -585,10 +586,9 @@ def main() -> None:
 
     total_time = round(time.time() - start_time, 3)
     summary = {
+        "entrypoint": ENTRYPOINT_NAME,
         "config_name": args.config_name,
-        "run_group": args.run_group,
-        "run_name": output_root.name,
-        "method": "hunyuan21_autoencode",
+        "group": args.run_group,
         "model": args.model,
         "requested_device": requested_device,
         "device": args.device,
@@ -601,7 +601,7 @@ def main() -> None:
         "reference_prompt_id": args.reference_prompt_id,
         "drop_normal": bool(args.drop_normal),
         "keep_materials": bool(args.keep_materials),
-        "total_seconds": total_time,
+        "total_time_seconds": total_time,
         "created_at": utc_now_iso(),
     }
     write_json(output_root / "summary.json", summary)

@@ -8,6 +8,7 @@ import os
 import random
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import TextIO
 
@@ -27,6 +28,7 @@ DEFAULT_SHARED_RENDER_ROOT = Path(
     "/cache/wangxinxing/data/trellis_edit_benchmark/edit3d_pseudosource_micro10_renders"
 )
 DEFAULT_VOXHAMMER_ROOT = Path("/home/wangxinxing/3dlocaledit/VoxHammer")
+ENTRYPOINT_NAME = "external_voxhammer_mv_cases"
 
 
 class _Tee(TextIO):
@@ -106,6 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    started_at = time.time()
     dataset_root = args.dataset_root.expanduser().resolve()
     shared_render_root = args.shared_render_root.expanduser().resolve()
     voxhammer_root = args.voxhammer_root.expanduser().resolve()
@@ -205,10 +208,10 @@ def main() -> int:
             torch.cuda.empty_cache()
 
     manifest = {
-        "run_name": pred_root.name,
+        "entrypoint": ENTRYPOINT_NAME,
         "config_name": pred_root.name,
-        "method": "external_voxhammer",
         "group": "mv",
+        "total_time_seconds": round(time.time() - started_at, 3),
         "dataset_root": str(dataset_root),
         "shared_render_root": str(shared_render_root),
         "voxhammer_root": str(voxhammer_root),

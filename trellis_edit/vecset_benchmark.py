@@ -177,16 +177,16 @@ def run_command(
         raise RuntimeError(f"Command failed with exit code {result.returncode}: {' '.join(cmd)}")
 
 
-def load_total_seconds(pred_root: Path) -> float:
+def load_total_time_seconds(pred_root: Path) -> float:
     summary_path = pred_root / "summary.json"
     if summary_path.is_file():
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
-        return float(summary.get("total_seconds") or 0.0)
+        return float(summary.get("total_time_seconds") or 0.0)
 
     manifest_path = pred_root / "manifest.json"
     if manifest_path.is_file():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        return float(manifest.get("total_elapsed_seconds") or 0.0)
+        return float(manifest.get("total_time_seconds") or 0.0)
 
     return 0.0
 

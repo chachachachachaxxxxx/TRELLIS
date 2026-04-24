@@ -20,7 +20,6 @@ from trellis_edit.common.save_utils import release_cuda_memory
 from run_batch_edit_and_eval import (
     DEFAULT_METRICS,
     load_edit3d_metadata,
-    render_all_results,
     run_evaluation,
     save_results,
 )
@@ -30,6 +29,7 @@ DEFAULT_GT_ROOT = Path("/cache/wangxinxing/data/trellis_edit_benchmark/edit3d_da
 DEFAULT_ASSETS_ROOT = Path("/cache/wangxinxing/data/trellis_edit_benchmark/edit3d_data/renders")
 DEFAULT_OUTPUT_ROOT = Path("/cache/wangxinxing/data/trellis_edit_benchmark/pred/baseline00_reconstruct")
 DEFAULT_MODEL = "microsoft/TRELLIS-image-large"
+ENTRYPOINT_NAME = "baseline00_reconstruct"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -371,10 +371,11 @@ def main() -> None:
         if not object_result.get("resumed", False):
             new_object_count += 1
         write_json(
-            output_root / "reconstruct_manifest.json",
+            output_root / "manifest.json",
             {
+                "entrypoint": ENTRYPOINT_NAME,
                 "config_name": args.config_name,
-                "run_group": args.run_group,
+                "group": args.run_group,
                 "model": args.model,
                 "device": args.device,
                 "render_gpu_ids": render_gpu_ids,
@@ -382,6 +383,7 @@ def main() -> None:
                 "metrics": list(args.metrics),
                 "object_shard_count": args.object_shard_count,
                 "object_shard_index": args.object_shard_index,
+                "total_time_seconds": round(time.time() - start_time, 3),
                 "cases": [
                     {
                         "dataset": case_dataset,
@@ -408,20 +410,19 @@ def main() -> None:
         print(f"[Done] Pred root: {output_root}")
         return
 
-    print("[Render] Rendering benchmark views...")
-    if not render_all_results(output_root, gpu_ids=render_gpu_ids, metrics=list(args.metrics)):
-        raise RuntimeError("Benchmark rendering failed.")
-
-    print("[Eval] Running benchmark evaluation...")
+    print("[Eval] Running single-view benchmark render + evaluation...")
     eval_output_dir = ensure_dir(output_root / "evaluation_output")
-    ok, summary = run_evaluation(
+    ok, summary, run_result = run_evaluation(
         gt_root=gt_root,
         pred_root=output_root,
         metrics=list(args.metrics),
         output_dir=eval_output_dir,
         device=eval_device,
+        render_gpu_ids=render_gpu_ids,
+        skip_render=False,
+        cases=cases,
     )
-    if not ok or summary is None:
+    if not ok or summary is None or run_result is None:
         raise RuntimeError("Benchmark evaluation failed.")
 
     total_time = time.time() - start_time
@@ -430,12 +431,8 @@ def main() -> None:
         entrypoint_name="baseline",
         config_name=args.config_name,
         run_group=args.run_group,
-        gt_root=gt_root,
-        cases=cases,
-        requested_metrics=list(args.metrics),
         benchmark_root=benchmark_root,
-        skip_benchmark_render=False,
-        results=summary,
+        run_result=run_result,
         total_time=total_time,
     )
     print(f"[Done] baseline00 reconstruct finished in {total_time:.1f}s")
