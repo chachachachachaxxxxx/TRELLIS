@@ -1,14 +1,14 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-`trellis/` contains the core pipelines, models, renderers, trainers, and utilities for image-to-3D and text-to-3D. Put no-training local editing work in `trellis_edit/`, especially `trellis_edit/composable/`, `trellis_edit/preprocess/`, `trellis_edit/hooks/`, `trellis_edit/inversion/`, `trellis_edit/samplers/`, and `trellis_edit/common/`; use [`run_edit_experiment.py`](/home/wangxinxing/3dlocaledit/TRELLIS_EDIT/run_edit_experiment.py) as the unified entrypoint. Keep smoke examples in `trellis_inference/`, tracing tools in `vis/`, dataset scripts in `dataset_toolkits/`, configs in `edit_configs/`, and assets in `assets/`. Treat `trellis/representations/mesh/flexicubes/` as vendored code: do not edit it unless the change is intentional.
+`trellis/` is the in-place vendored TRELLIS core: it contains the core pipelines, models, renderers, trainers, and utilities for image-to-3D and text-to-3D, and it should stay upstream-like. Put no-training local editing work in `trellis_edit/`, especially `trellis_edit/composable/`, `trellis_edit/preprocess/`, `trellis_edit/hooks/`, `trellis_edit/inversion/`, `trellis_edit/samplers/`, and `trellis_edit/common/`; use [`run_edit_experiment.py`](/home/wangxinxing/3dlocaledit/TRELLIS_EDIT/run_edit_experiment.py) as the unified entrypoint. Keep smoke examples in `trellis_inference/`, tracing tools in `vis/`, dataset scripts in `dataset_toolkits/`, configs in `edit_configs/`, and assets in `assets/`. Prefer placing any newly vendored external repos under `vendors/` instead of mixing them into `trellis/`. Treat `trellis/representations/mesh/flexicubes/` as vendored code: do not edit it unless the change is intentional.
 
 ## Build, Test, and Development Commands
 Work in the expected Conda env: `conda activate hammer`.
 
 - `python run_edit_experiment.py --list-entrypoints`: list runnable composable entrypoints.
 - `python run_edit_experiment.py --config edit_configs/template.config --dry-run`: validate structured composable config parsing.
-- `python run_batch_edit_and_eval.py --config edit_configs/quick_test_batch.yaml --dry-run`: validate batch composable config expansion for the first case.
+- `python run_batch_edit_and_eval.py --config edit_configs/batch/anchorflow_first12.yaml --dry-run`: validate batch composable config expansion for the first case.
 - `python -m compileall trellis trellis_edit run_edit_experiment.py run_batch_edit_and_eval.py`: syntax-check Python changes.
 - `python trellis_inference/example.py` or `python trellis_inference/example_text.py`: core pipeline smoke tests.
 
